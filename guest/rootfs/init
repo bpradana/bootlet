@@ -25,8 +25,9 @@ if [ -e /proc/device-tree/soc/virtio_mmio@10001000 ]; then
   i=0
   while [ ! -b /dev/vda ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
   mkdir -p /mnt/disk /mnt/lower /mnt/root
-  if mount -t ext2 -o sync,noatime /dev/vda /mnt/disk; then
-    ok "Mounted persistent disk /dev/vda ($(df -h /mnt/disk | awk 'NR==2 {print $2}'), ext2)."
+  # ext4 driver: replays the journal if the page was closed mid-write.
+  if mount -t ext4 -o noatime,commit=1 /dev/vda /mnt/disk; then
+    ok "Mounted persistent disk /dev/vda ($(df -h /mnt/disk | awk 'NR==2 {print $2}'), journaled)."
     mkdir -p /mnt/disk/root /mnt/disk/work
     mount --bind / /mnt/lower
     if mount -t overlay overlay -o lowerdir=/mnt/lower,upperdir=/mnt/disk/root,workdir=/mnt/disk/work /mnt/root; then

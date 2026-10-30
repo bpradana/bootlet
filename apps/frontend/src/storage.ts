@@ -16,7 +16,20 @@ export interface BlockStore {
   clear(): Promise<void>;
 }
 
+// Disks from earlier layouts, deleted when found: they were formatted
+// without a journal and can't be upgraded in place.
+const OLD_NAMES = ["bootlet", "bootlet-root-v1"];
+
+async function removeOldDisks() {
+  const root = await navigator.storage.getDirectory();
+  for (const name of OLD_NAMES) {
+    await root.removeEntry(name, { recursive: true }).catch(() => {});
+    indexedDB.deleteDatabase(name);
+  }
+}
+
 export async function openStore(): Promise<BlockStore> {
+  await removeOldDisks().catch(() => {});
   // After a reload the previous page's worker may still hold the OPFS lock
   // for a moment, so retry briefly before concluding another tab has it.
   for (let attempt = 0; ; attempt++) {
@@ -34,56 +47,99 @@ export async function openStore(): Promise<BlockStore> {
 }
 
 // Storage names carry a version: a disk from an incompatible layout (the old
-// 64 MiB /data disk) must not be mistaken for the current root filesystem.
-const NAME = "bootlet-root-v1";
+// unjournaled disks) must not be mistaken for the current root filesystem.
+const NAME = "bootlet-root-v2";
+
+const WAL_MAGIC = 0x4c415742; // "BWAL"
 
 async function openOPFS(): Promise<BlockStore> {
   const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle(NAME, { create: true });
-  const open = async (name: string) =>
-    (await dir.getFileHandle(name, { create: true })).createSyncAccessHandle();
   // Compact layout: "blocks" holds stored blocks back to back in slot order,
   // and "index" holds the disk block number of each slot. Writing blocks at
   // their disk offsets instead would make the file as long as the disk
   // (1 GiB), and browsers charge OPFS quota by file length.
-  const blocks = await open("blocks");
-  let index: FileSystemSyncAccessHandle;
+  //
+  // Each save goes through "wal" first, so a page closed mid-save leaves
+  // either the whole batch or none of it. The guest's journal relies on
+  // that: the stored disk must always be the device as of some moment.
+  const handles: FileSystemSyncAccessHandle[] = [];
   try {
-    index = await open("index");
+    for (const name of ["blocks", "index", "wal"]) {
+      handles.push(await (await dir.getFileHandle(name, { create: true })).createSyncAccessHandle());
+    }
   } catch (e) {
-    blocks.close(); // release the lock so a retry can succeed
+    handles.forEach((h) => h.close()); // release the locks so a retry can succeed
     throw e;
   }
+  const [blocks, index, wal] = handles;
 
   const slots = new Map<number, number>(); // disk block → slot
+  const apply = ({ idx, data }: Blocks) => {
+    idx.forEach((b, i) => {
+      let slot = slots.get(b);
+      if (slot === undefined) {
+        slot = slots.size;
+        slots.set(b, slot);
+        index.write(Uint32Array.of(b), { at: slot * 4 });
+      }
+      blocks.write(data.subarray(i * BLOCK, (i + 1) * BLOCK), { at: slot * BLOCK });
+    });
+    blocks.flush();
+    index.flush();
+    wal.truncate(0);
+    wal.flush();
+  };
+
+  // A complete batch left in the log was interrupted after it was logged:
+  // apply it again. An incomplete one never happened.
+  const recover = () => {
+    const size = wal.getSize();
+    if (size < 12) return;
+    const head = new Uint32Array(2);
+    wal.read(head, { at: 0 });
+    const n = head[1];
+    const end = 8 + n * 4 + n * BLOCK;
+    const trailer = new Uint32Array(1);
+    if (head[0] !== WAL_MAGIC || size !== end + 4 || (wal.read(trailer, { at: end }), trailer[0] !== WAL_MAGIC)) {
+      wal.truncate(0);
+      return;
+    }
+    const idx = new Uint32Array(n);
+    const data = new Uint8Array(n * BLOCK);
+    wal.read(idx, { at: 8 });
+    wal.read(data, { at: 8 + n * 4 });
+    apply({ idx, data });
+  };
+
   return {
     kind: "opfs",
     async load() {
-      const idx = new Uint32Array(index.getSize() / 4);
-      index.read(idx, { at: 0 });
+      const stored = new Uint32Array(index.getSize() / 4);
+      index.read(stored, { at: 0 });
+      stored.forEach((b, slot) => slots.set(b, slot));
+      recover();
+      const idx = new Uint32Array(slots.size);
+      for (const [b, slot] of slots) idx[slot] = b;
       const data = new Uint8Array(idx.length * BLOCK);
       blocks.read(data, { at: 0 });
-      idx.forEach((b, slot) => slots.set(b, slot));
       return { idx, data };
     },
-    async save({ idx, data }) {
-      idx.forEach((b, i) => {
-        let slot = slots.get(b);
-        if (slot === undefined) {
-          slot = slots.size;
-          slots.set(b, slot);
-          index.write(Uint32Array.of(b), { at: slot * 4 });
-        }
-        blocks.write(data.subarray(i * BLOCK, (i + 1) * BLOCK), { at: slot * BLOCK });
-      });
-      blocks.flush();
-      index.flush();
+    async save(batch) {
+      const n = batch.idx.length;
+      wal.truncate(0);
+      wal.write(Uint32Array.of(WAL_MAGIC, n), { at: 0 });
+      wal.write(batch.idx, { at: 8 });
+      wal.write(batch.data, { at: 8 + n * 4 });
+      wal.write(Uint32Array.of(WAL_MAGIC), { at: 8 + n * 4 + n * BLOCK }); // written last: the batch is complete
+      wal.flush();
+      apply(batch);
     },
     async clear() {
       slots.clear();
-      blocks.truncate(0);
-      index.truncate(0);
-      blocks.flush();
-      index.flush();
+      for (const h of [blocks, index, wal]) {
+        h.truncate(0);
+        h.flush();
+      }
     },
   };
 }

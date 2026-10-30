@@ -82,12 +82,18 @@ func (d *Disk) TakeDirty() (idx []uint64, data [][]byte) {
 	return idx, data
 }
 
-// FormatExt2 writes an empty ext2 filesystem (4 KiB blocks, root directory
-// and lost+found) to the disk. BusyBox has no mkfs.ext2, so a fresh disk is
-// formatted here instead of in the guest. Every block group carries a copy
-// of the superblock and group descriptors (no sparse_super); only metadata
-// blocks are written, so the sparse disk stays small.
-func (d *Disk) FormatExt2(label string) {
+// Format writes an empty filesystem (4 KiB blocks, root directory and
+// lost+found) to the disk. BusyBox has no mkfs, so a fresh disk is formatted
+// here instead of in the guest. Every block group carries a copy of the
+// superblock and group descriptors (no sparse_super); only metadata blocks
+// are written, so the sparse disk stays small.
+//
+// Disks of 64 MiB and more get an 8 MiB journal (ext3 layout, mounted with
+// the ext4 driver). The browser saves the disk in periodic batches, so after
+// a reload or a closed tab the disk is as if the power had been cut; the
+// kernel replays the journal on the next mount instead of finding a corrupt
+// filesystem.
+func (d *Disk) Format(label string) {
 	const (
 		bs        = BlockSize
 		bpg       = 8 * bs // blocks per group: one bitmap block's worth
@@ -108,10 +114,18 @@ func (d *Disk) FormatExt2(label string) {
 	now := uint32(time.Now().Unix())
 	le := binary.LittleEndian
 
+	// The journal (inode 8) follows the directories in group 0: its data
+	// blocks, then the indirect blocks that map them.
+	var journalBlocks uint32
+	if blocks >= 16384 {
+		journalBlocks = 2048
+	}
+	jStart := lfBlk + 1
+	journalMeta := journalMap(journalBlocks)
 	groupBlocks := func(g uint32) uint32 { return min(bpg, blocks-g*bpg) }
 	usedIn := func(g uint32) uint32 {
 		if g == 0 {
-			return overhead + 2 // root and lost+found directories
+			return overhead + 2 + journalBlocks + journalMeta // directories, journal
 		}
 		return overhead
 	}
@@ -143,6 +157,10 @@ func (d *Disk) FormatExt2(label string) {
 	le.PutUint32(sb[96:], 0x2) // incompat: filetype in directory entries
 	rand.Read(sb[104:120])     // UUID
 	copy(sb[120:136], label)
+	if journalBlocks > 0 {
+		le.PutUint32(sb[92:], 0x4) // compat: has_journal
+		le.PutUint32(sb[224:], 8)  // journal inode
+	}
 
 	gdt := make([]byte, bs)
 	for g := uint32(0); g < groups; g++ {
@@ -215,6 +233,86 @@ func (d *Disk) FormatExt2(label string) {
 	dirent(lf[0:], firstIno, 12, ".")
 	dirent(lf[12:], 2, bs-12, "..")
 	d.WriteAt(lf, uint64(lfBlk)*bs)
+
+	if journalBlocks > 0 {
+		d.writeJournal(jStart, journalBlocks, sb[104:120], now)
+	}
+}
+
+// journalMap returns how many indirect blocks map a journal of n blocks with
+// classic block pointers (12 direct, one indirect, then double indirect).
+func journalMap(n uint32) uint32 {
+	const per = BlockSize / 4
+	if n <= 12 {
+		return 0
+	}
+	if n <= 12+per {
+		return 1
+	}
+	return 2 + (n-12-per+per-1)/per
+}
+
+// writeJournal writes inode 8 and an empty (clean) JBD2 journal of n blocks
+// starting at block start, followed by its indirect blocks.
+func (d *Disk) writeJournal(start, n uint32, uuid []byte, now uint32) {
+	const (
+		bs        = BlockSize
+		per       = bs / 4
+		inodeSize = 128
+	)
+	le, be := binary.LittleEndian, binary.BigEndian
+	meta := start + n // next free block for indirect blocks
+	in := make([]byte, inodeSize)
+	le.PutUint16(in[0:], 0o100600)
+	le.PutUint32(in[4:], n*bs)
+	le.PutUint32(in[8:], now)
+	le.PutUint32(in[12:], now)
+	le.PutUint32(in[16:], now)
+	le.PutUint16(in[26:], 1)
+	le.PutUint32(in[28:], (n+journalMap(n))*bs/512)
+	for i := uint32(0); i < min(n, 12); i++ {
+		le.PutUint32(in[40+4*i:], start+i)
+	}
+	// pointers fills one indirect block with consecutive journal blocks.
+	pointers := func(at, first, count uint32) {
+		b := make([]byte, bs)
+		for i := uint32(0); i < count; i++ {
+			le.PutUint32(b[4*i:], start+first+i)
+		}
+		d.WriteAt(b, uint64(at)*bs)
+	}
+	if n > 12 {
+		ind := meta
+		meta++
+		le.PutUint32(in[40+4*12:], ind)
+		pointers(ind, 12, min(n-12, per))
+	}
+	if n > 12+per {
+		dind := meta
+		meta++
+		le.PutUint32(in[40+4*13:], dind)
+		table := make([]byte, bs)
+		for i, first := uint32(0), uint32(12+per); first < n; i, first = i+1, first+per {
+			le.PutUint32(table[4*i:], meta)
+			pointers(meta, first, min(n-first, per))
+			meta++
+		}
+		d.WriteAt(table, uint64(dind)*bs)
+	}
+	d.WriteAt(in, 4*bs+7*inodeSize) // inode 8
+
+	// JBD2 superblock (big-endian), version 2, nothing to replay (s_start 0).
+	js := make([]byte, bs)
+	be.PutUint32(js[0x00:], 0xc03b3998) // magic
+	be.PutUint32(js[0x04:], 4)          // superblock v2
+	be.PutUint32(js[0x0c:], bs)
+	be.PutUint32(js[0x10:], n)
+	be.PutUint32(js[0x14:], 1) // first log block
+	be.PutUint32(js[0x18:], 1) // first transaction sequence
+	copy(js[0x30:], uuid)
+	be.PutUint32(js[0x40:], 1) // users
+	copy(js[0x100:], uuid)
+	d.WriteAt(js, uint64(start)*bs)
 }
 
 func setBits(b []byte, from, to uint32) {

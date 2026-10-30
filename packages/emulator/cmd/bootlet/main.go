@@ -199,7 +199,7 @@ func openDisk(path string, size uint64) (*devices.Disk, func(), error) {
 		}
 	}
 	if st.Size() == 0 {
-		disk.FormatExt2("bootlet")
+		disk.Format("bootlet")
 		if err := f.Truncate(int64(size)); err != nil {
 			return nil, nil, err
 		}
