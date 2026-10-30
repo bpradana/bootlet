@@ -4,18 +4,18 @@
 
 # bootlet
 
-**A real RISC-V Linux kernel, booting to a shell entirely in your browser.**
+**A real RISC-V Linux machine, booting to a shell entirely in your browser.**
 
 [![CI](https://github.com/bpradana/bootlet/actions/workflows/pages.yml/badge.svg)](https://github.com/bpradana/bootlet/actions/workflows/pages.yml)
 [![Demo](https://img.shields.io/badge/demo-GitHub%20Pages-3fb950)](https://bpradana.github.io/bootlet/)
-![Guest](https://img.shields.io/badge/guest-RV64GC%20·%20Linux%206.18-lightgrey)
+![Guest](https://img.shields.io/badge/guest-RV64GC%20·%20Linux%206.18%20·%20Alpine%203.24-lightgrey)
 ![Runtime](https://img.shields.io/badge/runtime-Go%20→%20WebAssembly-00ADD8)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
 [Quick start](#quick-start) ·
 [How it works](#how-it-works) ·
+[Networking](#networking) ·
 [Emulator API](#emulator-api) ·
-[Performance](#performance) ·
 [Development](#development)
 
 </div>
@@ -23,25 +23,25 @@
 ---
 
 bootlet is an RV64GC (64-bit RISC-V) machine emulator written in Go and compiled to
-WebAssembly. Open the page and it boots an unmodified Linux kernel and BusyBox userland,
-then hands you a root shell on a serial console. You can run commands, edit files, and
-keep files across reloads in `/data`.
+WebAssembly. Open the page and it boots an unmodified Linux kernel with an Alpine
+userland, then hands you a root shell on a serial console. Connect it to a network
+relay and you can `apk add` real packages: Python, curl, git, compilers. Everything you
+install or change is saved in your browser.
 
 There is no server-side VM, container, or SSH session behind it. Every instruction runs
 in a Web Worker on your machine, and the site deploys as plain static files to any host.
+The optional relay only forwards network bytes, because browsers can't open raw sockets.
 The same emulator also builds natively, so it can be run and tested from a terminal.
 
 ```console
-root@bootlet:~# uname -a
-Linux bootlet 6.18.59-0-lts #1-Alpine SMP PREEMPT_DYNAMIC 2026-10-27 14:58:36 riscv64 Linux
-root@bootlet:~# grep -E 'isa|mmu' /proc/cpuinfo | head -2
-isa             : rv64imafdc_zicntr_zicsr_zifencei_zaamo_zalrsc_zca_zcd
-mmu             : sv39
+root@bootlet:~# apk add -q python3
+root@bootlet:~# python3 -c 'import platform, sys; print("Python", sys.version.split()[0], "on", platform.machine())'
+Python 3.14.10 on riscv64
 ```
 
 <div align="center">
-<img src="docs/assets/console.png" alt="The bootlet web page: a terminal running a BusyBox shell on RISC-V Linux, showing uname, cpuinfo, ls, a file written to the persistent /data disk, and the date" width="100%">
-<br><sub>Linux 6.18 at a root prompt, about five seconds after opening the page.</sub>
+<img src="docs/assets/console.png" alt="The bootlet web page: a terminal on RISC-V Linux running Python and curl installed with apk, with the toolbar showing the machine running, the network online, and the Stop, Restart and Reset disk buttons" width="100%">
+<br><sub>Python and curl installed with <code>apk</code>, still there after a page reload.</sub>
 </div>
 
 ## Contents
@@ -50,6 +50,7 @@ mmu             : sv39
 - [Quick start](#quick-start)
 - [How it works](#how-it-works)
 - [The guest](#the-guest)
+- [Networking](#networking)
 - [Persistent storage](#persistent-storage)
 - [Emulator API](#emulator-api)
 - [Performance](#performance)
@@ -65,11 +66,12 @@ mmu             : sv39
 |---|---|
 | 🧠 **A real RV64GC CPU** | RV64IMAFDC + Zicsr, Zifencei, and Zicntr, with M/S/U privilege modes, traps and delegation, and Sv39 paging with a software TLB. It passes all 134 official riscv-tests (`rv64ui/um/ua/uf/ud/uc/mi/si`). |
 | 🐧 **An unmodified kernel** | Alpine's prebuilt `linux-lts` 6.18 boots as shipped. A Go-native SBI firmware replaces OpenSBI, and the device tree is generated at runtime. |
-| 🌐 **Browser-only execution** | The emulator runs in a Web Worker, so the page stays responsive. No SharedArrayBuffer is used, so no COOP/COEP headers are needed. |
-| 💤 **Idles at idle** | When the guest executes `wfi`, the worker sleeps until the next timer event or keystroke, so a VM sitting at a prompt costs almost no CPU. |
-| 💾 **Persistent `/data`** | A virtio block device backed by the Origin Private File System, falling back to IndexedDB. Only changed 4 KiB blocks are written. |
-| 📦 **No toolchain for the guest** | `guestpack` (pure Go) downloads and verifies pinned Alpine packages and packs the initramfs. No cross compiler, Buildroot, or Docker is needed. |
-| 🖥️ **Native and WASM from one codebase** | The `machine` package drives both `cmd/bootlet` (a terminal runner) and `cmd/wasm` (the browser build), with the same API. |
+| 📦 **A real package manager** | musl, BusyBox, and `apk` come preinstalled and registered in apk's database, so `apk add` pulls anything from Alpine's riscv64 repositories. |
+| 🌐 **Networking** | virtio-net plus a user-mode TCP/IP stack in Go (like QEMU's slirp). Guest connections travel as [Wisp](https://github.com/MercuryWorkshop/wisp-protocol) streams over one WebSocket to a small relay you run. |
+| 💾 **Persistent root filesystem** | The whole filesystem is an overlay on a 1 GiB sparse virtio disk, saved to the Origin Private File System (or IndexedDB). Only changed 4 KiB blocks are written. **Reset disk** restores the stock system. |
+| 💤 **Idles at idle** | When the guest executes `wfi`, the worker sleeps until the next timer event, keystroke, or network packet, so a VM at a prompt costs almost no CPU. |
+| 🧩 **No toolchain for the guest** | `guestpack` (pure Go) downloads and verifies pinned Alpine packages and packs the initramfs. No cross compiler, Buildroot, or Docker is needed. |
+| 🖥️ **Native and WASM from one codebase** | The `machine` package drives both `cmd/bootlet` (a terminal runner with direct sockets) and `cmd/wasm` (the browser build). |
 | 🛠️ **One task runner** | [mise](https://mise.jdx.dev) pins Go, Node, pnpm, and zig, and defines every build, test, and dev workflow. |
 
 ## Quick start
@@ -79,18 +81,31 @@ You need [mise](https://mise.jdx.dev). It installs everything else.
 ```sh
 git clone https://github.com/bpradana/bootlet.git && cd bootlet
 mise install          # Go, Node, pnpm, zig
+mise run relay:dev    # network relay on :8089 (in a second terminal)
 mise run web:dev      # fetch the guest, build the WASM, start Vite on http://localhost:5173
 ```
 
-Open **http://localhost:5173**. The page downloads the emulator and guest (about 9 MB
-gzip), boots, and drops you at `root@bootlet:~#`. The toolbar can **Stop** (pause),
-**Start** (resume), and **Restart** (reboot) the machine. `poweroff` and `reboot` work from
-the shell too.
-
-To boot the same machine in your terminal instead:
+Open **http://localhost:5173/?relay=ws://localhost:8089/**. The page downloads the
+emulator and guest (about 13 MB gzip), boots, and drops you at `root@bootlet:~#` with
+the network online:
 
 ```sh
-mise run emu:run      # Ctrl-A x quits; /data is kept in guest/disk.img
+apk add python3 curl git
+curl -sI https://example.com | head -1
+```
+
+The toolbar can **Stop** (pause), **Start** (resume), **Restart** (reboot), and **Reset
+disk** (wipe your changes). `poweroff` and `reboot` work from the shell too. Without
+`?relay=`, the machine boots offline.
+
+Page options: `?relay=<ws url>` enables networking, `?mem=256` sets the guest RAM in MiB
+(the default is 128), and `?quiet` hides the boot log.
+
+To boot the same machine in your terminal instead, with networking through your own
+sockets:
+
+```sh
+mise run emu:run      # Ctrl-A x quits; the root filesystem is kept in guest/disk.img
 ```
 
 ## How it works
@@ -106,27 +121,41 @@ flowchart LR
             machine["machine<br/>run · input · reset"] --> cpu["RV64GC hart<br/>Sv39 MMU · TLB"]
             machine --> sbi["SBI firmware"]
             cpu --> bus["MMIO bus"]
-            bus --> devs["UART 16550 · PLIC · CLINT<br/>Goldfish RTC · virtio-blk"]
+            bus --> devs["UART · PLIC · CLINT · RTC<br/>virtio-blk · virtio-net"]
+            devs --> stack["netstack<br/>ARP · DNS · TCP"]
         end
         devs -.->|"takeDirty()"| store
     end
 
+    stack <-->|"Wisp over WebSocket"| relay["apps/relay"] <-->|TCP| internet(("Internet"))
     static[("Static host<br/>bootlet.wasm · Image.gz · initrd.cpio.gz")] -->|"fetch + DecompressionStream"| worker
 ```
+
+<div align="center">
+<img src="docs/assets/boot.png" alt="The boot log in the browser: Linux kernel messages with timestamps, followed by systemd-style [ OK ] lines for loading modules, mounting the persistent disk, switching to the overlay root, configuring the network, and starting the shell" width="100%">
+<br><sub>The whole boot is visible: the kernel's log from its first instruction, then the guest's <code>[ OK ]</code> steps.</sub>
+</div>
 
 Opening the page goes through these steps:
 
 1. The worker downloads the WASM, kernel, and initramfs in parallel, and decompresses
    the gzip files with `DecompressionStream`. The guest never decompresses anything at
-   emulated speed. In parallel, it opens the persistent disk.
+   emulated speed. At the same time, it loads the saved disk blocks and opens the relay
+   WebSocket.
 2. Go builds the machine and copies the kernel to `0x80200000`. It places the initramfs
    and a generated device tree at the top of RAM, sets the delegation CSRs that
    firmware would normally leave behind, and enters the kernel in **S-mode**.
 3. The kernel's `ecall`s (timer, IPI, remote fence, HSM, reset, debug console) are
    handled in Go, not by M-mode firmware.
-4. The worker calls `run(12ms)` in a loop. It posts console output between slices, and
-   feeds keystrokes into the UART's receive queue. When the guest idles, `run` returns
-   how long until the next timer interrupt and the worker sleeps.
+4. The guest's `/init` loads the virtio drivers, mounts the disk, and makes it the upper
+   layer of an overlay whose lower layer is the initramfs. It then hands over to BusyBox
+   `init`, which configures `eth0` and starts a shell. Each step prints a systemd-style
+   `[  OK  ]` line. From `/init` on, the console only shows kernel errors, so kernel
+   messages don't tear the status lines; `dmesg` has everything.
+5. The worker calls `run(12ms)` in a loop. Between slices it posts console output, feeds
+   keystrokes to the UART, and moves Wisp packets between the emulator and the WebSocket.
+   When the guest idles, `run` returns how long until the next timer interrupt, and the
+   worker sleeps.
 
 The device tree advertises exactly the extensions the CPU implements. A generic distro
 kernel patches in code for any extension it is told about (Zbb, Svpbmt, V, and so on), so
@@ -139,18 +168,20 @@ discovers it must fall back to Sv39.
 ```
 packages/emulator/       Go module: the machine, with no frontend dependencies
   cpu/                   hart: decode/execute, CSRs, traps, FPU, RVC table, Sv39 MMU + TLB
-  devices/               UART 16550, PLIC, CLINT, Goldfish RTC, virtio-mmio block, sparse disk + ext2 mkfs
+  devices/               UART, PLIC, CLINT, RTC, virtio-mmio transport, virtio-blk/-net, sparse disk + ext2 mkfs
+  netstack/              user-mode network: ARP, ICMP, fake DNS, TCP termination; direct and Wisp upstreams
   fdt/                   device tree blob encoder
   boot/                  RISC-V Image and ELF loaders
   machine/               memory map, device tree, SBI firmware, run loop: the public API
-  cmd/bootlet/           native terminal runner
+  cmd/bootlet/           native terminal runner (-net, -relay, -disk)
   cmd/wasm/              exposes the machine to JavaScript as globalThis.bootlet
-packages/shared/         UI ⇄ worker message protocol (TypeScript)
+packages/shared/         UI ⇄ worker protocol (TypeScript) and the Wisp protocol (Go, wisp/)
 apps/frontend/           Vite + xterm.js page, emulator worker, OPFS/IndexedDB storage, Playwright tests
+apps/relay/              Wisp relay server (Go) and its Dockerfile
 guest/
   manifest.toml          pinned Alpine packages (sha256), required kernel options, modules
-  rootfs/                files overlaid on the initramfs: init, inittab, rcS, profile, motd
-  tools/cmd/guestpack    fetch → verify → extract → check → pack
+  rootfs/                files overlaid on the initramfs: init, inittab, rcS, apk repositories, motd
+  tools/cmd/guestpack    fetch → verify → extract → check → pack, plus apk's installed database
 scripts/                 riscv-tests build (zig cc)
 .github/workflows/       build, test, and deploy to GitHub Pages
 ```
@@ -162,22 +193,28 @@ scripts/                 riscv-tests build (zig cc)
 The guest is built from prebuilt **Alpine Linux 3.24 riscv64** packages, so nothing is
 compiled. `mise run guest:fetch` runs `guestpack`, which does the following:
 
-1. Downloads `linux-lts` and `busybox-static`, and checks them against the sha256 pinned
-   in `guest/manifest.toml`.
+1. Downloads the kernel (`linux-lts`) and the userland (`busybox-static`, `musl`,
+   `apk-tools-static`, `alpine-keys`, `ca-certificates-bundle`), and checks each against
+   the sha256 pinned in `guest/manifest.toml`.
 2. Decompresses the kernel to a raw RISC-V Image (21 MB, 7.1 MB gzip).
 3. Reads `/boot/config-*` and fails if any option the emulator relies on is not built
    in, for example the 8250 UART, PLIC, SBI timer, and devtmpfs.
-4. Reads BusyBox's applet table out of the binary, so every applet link is created
+4. Unpacks every userland package and writes apk's installed database
+   (`/lib/apk/db/installed`, with package checksums and per-file hashes), so `apk add`
+   knows musl and friends are already present.
+5. Reads BusyBox's applet table out of the binary, so every applet link is created
    at pack time instead of running `busybox --install` at every boot.
-5. Adds the virtio and ext4 modules with their dependencies, resolved from
+6. Adds the virtio, ext4, and overlay modules with their dependencies, resolved from
    `modules.dep`. It decompresses them and strips their signatures, because verifying a
    signature costs the guest a SHA-256 and an RSA check at emulated speed.
-6. Writes a newc initramfs: BusyBox, the modules, and the `guest/rootfs` overlay.
+7. Writes a newc initramfs (8.6 MB, 4.4 MB gzip) with the `guest/rootfs` files on top.
 
-The default kernel command line also skips boot work that is wasted under emulation:
+The default kernel command line shows the boot log from the first instruction
+(`earlycon=sbi`; `?quiet` appends `quiet loglevel=3`) and skips boot work that is wasted
+under emulation:
 
 ```
-console=ttyS0 quiet loglevel=3 no4lvl unaligned_scalar_speed=fast cma=0 initcall_blacklist=jent_mod_init
+console=ttyS0 earlycon=sbi no4lvl unaligned_scalar_speed=fast cma=0 initcall_blacklist=jent_mod_init
 ```
 
 The jitter-entropy self-test alone was about half of the boot time. The kernel's RNG is
@@ -186,21 +223,70 @@ seeded from the device tree's `rng-seed` instead.
 To change the guest, edit `guest/manifest.toml` (packages, modules, required options) or
 the files in `guest/rootfs/`, then run `mise run guest:fetch` again.
 
+## Networking
+
+Browsers can't open TCP sockets, and Alpine's mirrors don't send CORS headers, so a
+static page can't reach the network by itself. bootlet splits the problem in two:
+
+- **In the emulator** (`packages/emulator/netstack`), a user-mode network gives the
+  guest a LAN, like QEMU's slirp:
+
+  | Address | Role |
+  |---|---|
+  | `10.0.2.15/24` | the guest (`eth0`, configured at boot) |
+  | `10.0.2.2` | gateway; connections to it reach the relay host's `localhost` |
+  | `10.0.2.3` | DNS: every name gets a placeholder address from `198.18.0.0/15` |
+
+  The stack terminates the guest's TCP connections itself. When the guest connects to a
+  placeholder address, it opens a stream to the **hostname**, so name resolution happens
+  at the relay. The emulator never needs UDP.
+- **The relay** (`apps/relay`) is a small [Wisp](https://github.com/MercuryWorkshop/wisp-protocol)
+  v1 server. One WebSocket carries all of a page's streams, and the relay opens the
+  real TCP connections.
+
+### Running a relay
+
+```sh
+mise run relay:dev                                   # local: -allow-private, any origin
+docker build -f apps/relay/Dockerfile -t bootlet-relay .
+docker run -p 8089:8089 bootlet-relay -origins bpradana.github.io
+```
+
+Put it behind TLS (any reverse proxy, Fly.io, Cloudflare Tunnel...) and open the page
+with `?relay=wss://relay.example.com/`. To make that the default for a deployment, set
+the repository variable `RELAY_URL` (Settings → Secrets and variables → Actions). The
+Pages build bakes it in as `VITE_RELAY_URL`.
+
+An open TCP relay can be abused, so the relay is restrictive by default:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `-ports` | `80,443,9418,22` | destination ports allowed (`all` for any) |
+| `-allow-private` | off | loopback, private, link-local, CGNAT, and metadata addresses are refused after DNS resolution; the checked address is the one dialed, so DNS rebinding can't bypass it |
+| `-origins` | any | allowed page origins for the WebSocket, e.g. `bpradana.github.io` |
+| `-max-streams` | `64` | concurrent connections per page |
+
+The native runner doesn't need a relay: `-net` uses the host's own sockets, and
+`-relay ws://…` goes through a relay to test that path.
+
 ## Persistent storage
 
-`/data` is a 64 MiB virtio block device that survives page reloads:
+The root filesystem survives page reloads:
 
-- The disk is **sparse** in memory, so an empty disk holds a few metadata blocks. BusyBox
-  has no `mkfs.ext2`, so the emulator formats a fresh disk as ext2 itself.
-- The guest loads the drivers and mounts the disk with `-o sync` in the background, so
-  the shell isn't delayed.
+- The disk is a 1 GiB **sparse** virtio block device: only written blocks take memory
+  or storage, so a fresh system costs about 200 KB. In OPFS, blocks are stored back to
+  back with an index, so storage use matches what was written, not the disk size. BusyBox has no `mkfs.ext2`, so
+  the emulator formats a new disk as ext2 itself.
+- `/init` mounts it (`-o sync`) as the upper layer of an **overlay** on top of the
+  initramfs. Everything you write, from `apk add` to `/root` and `/etc`, lands on the
+  disk. `/tmp` and `/run` are tmpfs.
 - Every 2 seconds, and when the machine stops, the worker collects the 4 KiB blocks
   written since the last save. It stores them in the **Origin Private File System**, or
   in **IndexedDB** where OPFS sync handles aren't available.
+- **Reset disk** wipes the saved blocks and reboots into the stock system.
 
-Hover the status indicator to see which backend is in use. To wipe the disk, clear the
-site's data in your browser. The native runner keeps the same disk format in a sparse
-file (`-disk guest/disk.img`).
+Hover the status indicator to see which backend is in use. The native runner keeps the
+same disk format in a sparse file (`-disk guest/disk.img`).
 
 ## Emulator API
 
@@ -211,9 +297,10 @@ calls on `globalThis.bootlet`.
 m := machine.New(machine.Config{RAMSize: 128 << 20}) // Cmdline defaults to machine.DefaultCmdline
 m.LoadKernel(image)                                   // raw RISC-V Linux Image
 m.LoadInitrd(cpio)
-disk := devices.NewDisk(64 << 20)                     // optional: virtio-blk at /dev/vda,
-disk.FormatExt2("bootlet")                            // mounted by the guest at /data
+disk := devices.NewDisk(1 << 30)                      // optional: virtio-blk at /dev/vda,
+disk.FormatExt2("bootlet")                            // the guest's persistent root
 m.AttachDisk(disk)
+m.AttachNet(netstack.New(netstack.NewDirectUpstream())) // optional: virtio-net
 m.Reset()                                             // (re)boot
 
 for {
@@ -233,7 +320,8 @@ for {
 |---|---|
 | `create(ramMiB, cmdline)` | `machine.New` |
 | `loadKernel(Uint8Array)`, `loadInitrd(Uint8Array)` | `LoadKernel`, `LoadInitrd` |
-| `attachDisk(sizeMiB, idx, data)`, `takeDirty()` | `AttachDisk`, `Disk.Restore`, `Disk.TakeDirty` |
+| `attachDisk(sizeMiB, idx, data)`, `takeDirty()`, `resetDisk(sizeMiB)` | `AttachDisk`, `Disk.Restore`, `Disk.TakeDirty`, `ReplaceDisk` |
+| `attachNet()`, `netInput(packet)`, `netOutput()`, `netDisconnected()` | `AttachNet` with a `netstack.WispUpstream` |
 | `reset()` | `Reset` |
 | `run(budgetMs)` → `{output, halted, idle, idleMs, instructions}` | `Run` + `Output` |
 | `input(Uint8Array)` | `Input` |
@@ -247,14 +335,21 @@ The physical memory map follows QEMU's `virt` machine:
 | `0x0c00_0000` | PLIC (31 sources, M and S contexts) |
 | `0x1000_0000` | 16550A UART, IRQ 10 |
 | `0x1000_1000` | virtio-mmio block device, IRQ 1 (when a disk is attached) |
-| `0x8000_0000` | RAM (128 MiB by default) |
+| `0x1000_2000` | virtio-mmio network device, IRQ 2 (when networking is attached) |
+| `0x8000_0000` | RAM (128 MiB by default, `?mem=256` in the page) |
 
 ## Performance
 
 | | Shell prompt after | Speed while booting |
 |---|---|---|
-| Native (Apple Silicon) | ~1.1 s | ~90–100 MIPS |
-| Browser (Chromium, WebAssembly) | ~5.5 s from page load, served locally | ~25–30 MIPS |
+| Native (Apple Silicon) | ~1.7 s | ~90–100 MIPS |
+| Browser (Chromium, WebAssembly) | ~9 s from page load, served locally | ~25–30 MIPS |
+
+Measured with the boot log on, and with the persistent disk and networking attached,
+which load their drivers before `init`. Printing the log costs under 0.1 s. Package installs are CPU-bound (decompressing and writing files at
+emulated speed): `apk add lua5.4` takes about 10 s natively, and `apk add python3`
+(about 45 MB) takes about 3.5 minutes in the browser. Both are one-time costs, since the
+result persists.
 
 Function calls are comparatively expensive in Go's WebAssembly output, so the hot path
 is built to avoid them:
@@ -266,31 +361,34 @@ is built to avoid them:
 - Opcodes dispatch through a dense jump table.
 - The clock is read once per 20,000 instructions.
 
-Downloads total about 9 MB gzip: kernel 7.1 MB, initramfs 1.1 MB, WASM 0.9 MB, and the
-page itself under 100 KB.
+Downloads total about 13 MB gzip: kernel 7.1 MB, initramfs 4.4 MB (half of it is
+`apk.static`), WASM 1 MB, and the page itself under 100 KB.
 
 ## Deployment
 
 `mise run build` writes a self-contained static site to `dist/`. Asset URLs are
-relative, so it works from any path. It needs no special headers and no server logic.
+relative, so it works from any path. It needs no special headers and no server logic;
+networking is optional and lives in the separate relay.
 
 `.github/workflows/pages.yml` runs `mise run test` on every push and pull request, and
 deploys `dist/` to GitHub Pages from `main`. To enable it, set **Settings → Pages →
-Source** to **GitHub Actions**.
+Source** to **GitHub Actions**. Set the `RELAY_URL` variable to give the deployed site a
+default relay.
 
 ## Development
 
 | Task | Command |
 |---|---|
 | Dev server (guest + WASM + Vite) | `mise run web:dev` |
-| Boot natively in the terminal | `mise run emu:run` |
+| Local network relay | `mise run relay:dev` |
+| Boot natively in the terminal, with networking | `mise run emu:run` |
 | Fetch and pack the guest | `mise run guest:fetch` |
-| Go unit tests + riscv-tests | `mise run emu:test` (builds riscv-tests with `zig cc` on first run) |
-| Native boot test (shell commands, `/data` across reboot) | `mise run emu:boot-test` |
-| Browser end-to-end tests (Playwright) | `mise run web:e2e` |
+| Go unit tests (CPU + riscv-tests, devices, netstack, Wisp, relay, guest tools) | `mise run emu:test` |
+| Native boot test (shell, HTTP through the stack, persistence across reboot) | `mise run emu:boot-test` (`BOOTLET_ONLINE=1` adds a real `apk add`) |
+| Browser end-to-end tests (Playwright; boot, Reset disk, relay networking) | `mise run web:e2e` |
 | gofmt, vet, TypeScript typecheck | `mise run lint` |
 | Everything CI runs | `mise run test` |
-| Production build | `mise run build` |
+| Production build · relay image | `mise run build` · `mise run relay:docker` |
 
 Run `mise tasks` to list all tasks. To debug early boot, pass a verbose command line to
 the native runner:
@@ -305,22 +403,32 @@ go run ./cmd/bootlet -kernel ../../guest/out/Image -initrd ../../guest/out/initr
 
 | Symptom | Cause and fix |
 |---|---|
+| The toolbar says **Network off** | No relay is configured. Open the page with `?relay=wss://<relay>/`, or set `RELAY_URL` for the deployment. |
+| The toolbar says **Offline** | The relay is unreachable or refused the page's origin (check its `-origins`). The page reconnects with backoff; open connections in the guest are reset. |
+| `wget https://…` fails | BusyBox `wget`'s built-in TLS can't talk to many modern servers. Use `apk add curl` and `curl`. Plain HTTP `wget` works. |
+| A connection is refused immediately | The relay blocks that port or address. Private and loopback destinations need `-allow-private` (local testing only). |
+| The system misbehaves after a site update | The saved overlay still holds files from the previous version (for example apk's database). Use **Reset disk**. |
+| Status tooltip says changes are not saved | The browser blocks storage (for example, some private windows), or another tab holds the OPFS disk. Close the other tab and reload. |
 | `guestpack: sha256 mismatch` | The mirror's file differs from the pinned one. Alpine replaced the package: update `guest/manifest.toml` to the new version and hash. |
 | `guestpack: kernel lacks required built-in options` | The kernel in the manifest was built without a driver the emulator needs. Pick a kernel that has it built in (`=y`). |
-| Status tooltip says `/data is not persistent` | The browser blocks storage (for example, some private windows), or another tab holds the OPFS disk. Close the other tab and reload. |
 | `mise install` stalls on zig | Zig mirrors can be slow. Zig is only needed for `emu:riscv-tests`; retry, or skip it for frontend work. |
-| `emu:test` reports riscv-tests skipped | They are not built yet. Run `mise run emu:riscv-tests`. |
-| The page works locally but not when deployed | Make sure `dist/guest/*.gz` and `dist/bootlet.wasm` were uploaded. The build copies them from `guest/out`, so run `guest:fetch` first. |
 
 ## Known limitations
 
 - **Single hart.** WebAssembly is single-threaded here, and SMP would add complexity
   without speed.
-- **No network.** There is no NIC; the guest is offline by design.
+- **TCP and IPv4 only.** The guest can't send ICMP beyond the gateway, or UDP other than
+  DNS. Wisp has no half-close, so a guest `shutdown(SHUT_WR)` keeps the remote side open
+  until it closes.
 - **Serial console only.** There is no framebuffer or graphical display.
-- **Interpreter speed.** A generic distro kernel boots in seconds, but CPU-heavy work runs
-  at tens of MIPS. A decoded-block cache or translating hot blocks to WebAssembly would
-  be the next step.
+- **Interpreter speed.** CPU-heavy work runs at tens of MIPS. A decoded-block cache, or
+  translating hot blocks to WebAssembly, would be the next step.
+- **Disk size vs. memory.** The disk is 1 GiB, but every block written is also held in
+  the page's memory, and downloads have no backpressure from the relay. In practice a
+  few hundred MB of installed software is the comfortable limit for a browser tab.
+- **ext2 without fsck.** Closing the tab in the middle of a write can leave the disk
+  inconsistent, and BusyBox has no `e2fsck`. Writes are synchronous and saved every 2 s,
+  and Reset disk is the way out.
 - **Guest clock pauses aren't hidden.** After Stop and Start, the guest sees the
   wall-clock time that passed.
 
@@ -328,11 +436,11 @@ go run ./cmd/bootlet -kernel ../../guest/out/Image -initrd ../../guest/out/initr
 
 bootlet is licensed under the [MIT License](LICENSE).
 
-The deployed site redistributes the Linux kernel and BusyBox, both under the GNU GPL
-version 2, as prebuilt by [Alpine Linux](https://alpinelinux.org). Corresponding
-sources are available from Alpine's
-[aports](https://gitlab.alpinelinux.org/alpine/aports) for the versions pinned in
-`guest/manifest.toml`. The page bundles [xterm.js](https://github.com/xtermjs/xterm.js)
+The deployed site redistributes the Linux kernel, BusyBox, musl, and apk-tools as
+prebuilt by [Alpine Linux](https://alpinelinux.org), under their own licenses (GPL-2.0
+for Linux, BusyBox, and apk-tools; MIT for musl). Corresponding sources are available
+from Alpine's [aports](https://gitlab.alpinelinux.org/alpine/aports) for the versions
+pinned in `guest/manifest.toml`. The page bundles [xterm.js](https://github.com/xtermjs/xterm.js)
 under the MIT License. The CPU is checked against the
 [riscv-tests](https://github.com/riscv-software-src/riscv-tests) suite, which is fetched
 at build time and not redistributed.

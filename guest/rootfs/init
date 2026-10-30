@@ -1,8 +1,43 @@
 #!/bin/sh
-# PID 1 starts here: mount the pseudo filesystems, then hand over to busybox init.
+# PID 1 starts here. With a persistent disk attached, the root filesystem
+# becomes an overlay: the initramfs is the read-only lower layer and the
+# disk holds every change, so installed packages and edits survive reboots.
+. /lib/bootlet-status.sh
+
 mount -t devtmpfs devtmpfs /dev
 mount -t proc proc /proc
 mount -t sysfs sysfs /sys
-mount -t tmpfs tmpfs /tmp
-mount -t tmpfs tmpfs /run
+# From here on only kernel errors reach the console, so kernel chatter does
+# not interleave with the status lines below (everything is still in dmesg).
+echo 4 > /proc/sys/kernel/printk
+ok "Mounted kernel filesystems /dev, /proc, /sys."
+
+if ls /proc/device-tree/soc | grep -q virtio_mmio; then
+  info "Loading kernel modules..."
+  loaded=""
+  for m in $(cat /lib/modules/load.list); do
+    insmod "/lib/modules/$m" 2>/dev/null && loaded="$loaded ${m%.ko}"
+  done
+  ok "Loaded kernel modules:$loaded."
+fi
+
+if [ -e /proc/device-tree/soc/virtio_mmio@10001000 ]; then
+  i=0
+  while [ ! -b /dev/vda ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  mkdir -p /mnt/disk /mnt/lower /mnt/root
+  if mount -t ext2 -o sync,noatime /dev/vda /mnt/disk; then
+    ok "Mounted persistent disk /dev/vda ($(df -h /mnt/disk | awk 'NR==2 {print $2}'), ext2)."
+    mkdir -p /mnt/disk/root /mnt/disk/work
+    mount --bind / /mnt/lower
+    if mount -t overlay overlay -o lowerdir=/mnt/lower,upperdir=/mnt/disk/root,workdir=/mnt/disk/work /mnt/root; then
+      for d in dev proc sys; do mount --move /$d /mnt/root/$d; done
+      ok "Switched to persistent root filesystem (overlay on /dev/vda)."
+      # switch_root would delete the initramfs, which is the lower layer.
+      exec chroot /mnt/root /sbin/init
+    fi
+    fail "Could not set up the overlay root; changes will not be saved."
+  else
+    fail "Could not mount the persistent disk; changes will not be saved."
+  fi
+fi
 exec /sbin/init

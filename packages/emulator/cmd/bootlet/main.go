@@ -13,6 +13,7 @@ import (
 
 	"bootlet/emulator/devices"
 	"bootlet/emulator/machine"
+	"bootlet/emulator/netstack"
 )
 
 func main() {
@@ -20,11 +21,17 @@ func main() {
 	initrd := flag.String("initrd", "", "initramfs (cpio)")
 	mem := flag.Uint64("mem", machine.DefaultRAM>>20, "RAM size in MiB")
 	cmdline := flag.String("cmdline", machine.DefaultCmdline, "kernel command line")
-	diskPath := flag.String("disk", "", "persistent disk image for /data (created if missing)")
-	diskSize := flag.Uint64("disk-size", 64, "size in MiB of a newly created disk")
+	quiet := flag.Bool("quiet", false, "hide the kernel boot log")
+	diskPath := flag.String("disk", "", "persistent root disk image (created if missing)")
+	diskSize := flag.Uint64("disk-size", 1024, "size in MiB of a newly created disk (sparse)")
+	direct := flag.Bool("net", false, "give the guest network access through this process's sockets")
+	relayURL := flag.String("relay", "", "give the guest network access through a Wisp relay (ws:// or wss:// URL)")
 	flag.Parse()
 	log.SetFlags(0)
 
+	if *quiet {
+		*cmdline += " " + machine.QuietCmdline
+	}
 	m := machine.New(machine.Config{RAMSize: *mem << 20, Cmdline: *cmdline})
 	data, err := os.ReadFile(*kernel)
 	if err != nil {
@@ -49,6 +56,24 @@ func main() {
 		m.AttachDisk(disk)
 		saveDisk = save
 		defer save()
+	}
+	// Networking: netWake signals upstream events while the guest idles,
+	// netPump moves relay packets (a no-op for direct sockets).
+	var netWake <-chan struct{}
+	netPump := func() {}
+	switch {
+	case *relayURL != "":
+		up := netstack.NewWispUpstream()
+		link, err := dialRelay(*relayURL, up)
+		if err != nil {
+			log.Fatalf("relay: %v", err)
+		}
+		m.AttachNet(netstack.New(up))
+		netWake, netPump = link.wake, link.pump
+	case *direct:
+		up := netstack.NewDirectUpstream()
+		m.AttachNet(netstack.New(up))
+		netWake = up.Notify
 	}
 	if err := m.Reset(); err != nil {
 		log.Fatal(err)
@@ -103,9 +128,11 @@ func main() {
 
 loop:
 	for {
+		netPump()
 		res := m.Run(50 * time.Millisecond)
 		instret += res.Instructions
 		os.Stdout.Write(m.Output())
+		netPump()
 		if saveDisk != nil {
 			saveDisk()
 		}
@@ -123,7 +150,8 @@ loop:
 			}
 		}
 		if res.Idle {
-			// Sleep until input arrives or the next timer event is due.
+			// Sleep until input or network data arrives or the next timer
+			// event is due.
 			var wait <-chan time.Time
 			if res.IdleFor >= 0 {
 				wait = time.After(res.IdleFor)
@@ -133,6 +161,7 @@ loop:
 				if !recv(b, ok) {
 					break loop
 				}
+			case <-netWake:
 			case <-wait:
 			}
 		}

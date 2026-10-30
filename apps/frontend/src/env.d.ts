@@ -8,7 +8,7 @@ declare module "*/wasm_exec.js";
 
 /** The API registered by packages/emulator/cmd/wasm. */
 interface BootletAPI {
-  create(ramMiB: number, cmdline: string): void;
+  create(ramMiB: number, cmdline: string, quiet: boolean): void;
   loadKernel(image: Uint8Array): string | null;
   loadInitrd(cpio: Uint8Array): void;
   reset(): string | null;
@@ -22,4 +22,14 @@ interface BootletAPI {
   input(data: Uint8Array): void;
   attachDisk(sizeMiB: number, idx: Uint32Array, data: Uint8Array): void;
   takeDirty(): { idx: Uint32Array; data: Uint8Array } | null;
+  resetDisk(sizeMiB: number): void;
+  attachNet(): void;
+  netInput(packet: Uint8Array): void;
+  netOutput(): Uint8Array<ArrayBuffer>[];
+  netDisconnected(): void;
+}
+
+interface ImportMetaEnv {
+  /** Default Wisp relay URL baked in at build time (optional). */
+  readonly VITE_RELAY_URL?: string;
 }

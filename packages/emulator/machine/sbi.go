@@ -1,6 +1,10 @@
 package machine
 
-import "bootlet/emulator/cpu"
+import (
+	"bytes"
+
+	"bootlet/emulator/cpu"
+)
 
 // SBI (RISC-V Supervisor Binary Interface) firmware implemented in Go. The
 // kernel runs in S-mode and its ecalls land here instead of in an M-mode
@@ -95,7 +99,7 @@ func (m *Machine) sbi(c *cpu.CPU) {
 				err = sbiErrInvalid
 				break
 			}
-			m.UART.Print(b)
+			m.consolePrint(b)
 			val = a0
 		case 1: // read
 			b, ok := c.ReadPhys(a1|a2<<32, int(a0))
@@ -105,7 +109,7 @@ func (m *Machine) sbi(c *cpu.CPU) {
 			}
 			val = uint64(copy(b, m.UART.TakeInput(len(b))))
 		case 2: // write_byte
-			m.UART.Print([]byte{byte(a0)})
+			m.consolePrint([]byte{byte(a0)})
 		default:
 			err = sbiErrNotSupp
 		}
@@ -121,7 +125,7 @@ func (m *Machine) legacy(c *cpu.CPU, eid, a0 uint64) int64 {
 	case 0:
 		m.setTimer(a0)
 	case 1:
-		m.UART.Print([]byte{byte(a0)})
+		m.consolePrint([]byte{byte(a0)})
 	case 2:
 		if b := m.UART.TakeInput(1); len(b) == 1 {
 			return int64(b[0])
@@ -137,6 +141,17 @@ func (m *Machine) legacy(c *cpu.CPU, eid, a0 uint64) int64 {
 		m.halted = true
 	}
 	return 0
+}
+
+// consolePrint writes SBI console output. Like OpenSBI, it turns "\n" into
+// "\r\n": the kernel's SBI early console sends bare newlines, unlike the
+// 8250 driver which does the conversion itself.
+func (m *Machine) consolePrint(b []byte) {
+	if !bytes.Contains(b, []byte{'\n'}) {
+		m.UART.Print(b)
+		return
+	}
+	m.UART.Print(bytes.ReplaceAll(b, []byte{'\n'}, []byte{'\r', '\n'}))
 }
 
 func (m *Machine) setTimer(t uint64) {

@@ -92,3 +92,26 @@ func TestDiskDirtyTracking(t *testing.T) {
 		t.Fatalf("read back %q", buf)
 	}
 }
+
+func TestFormatExt2MultiGroup(t *testing.T) {
+	d := NewDisk(1 << 30)
+	d.FormatExt2("big")
+	sb := make([]byte, 1024)
+	d.ReadAt(sb, 1024)
+	le := func(off int) uint32 {
+		return uint32(sb[off]) | uint32(sb[off+1])<<8 | uint32(sb[off+2])<<16 | uint32(sb[off+3])<<24
+	}
+	if le(4) != 262144 || le(32) != 32768 {
+		t.Fatalf("blocks=%d per group=%d", le(4), le(32))
+	}
+	// Group 7's backup superblock must exist and name its group.
+	backup := make([]byte, 1024)
+	d.ReadAt(backup, 7*32768*BlockSize)
+	if backup[56] != 0x53 || backup[57] != 0xef || backup[90] != 7 {
+		t.Fatal("missing or wrong backup superblock in group 7")
+	}
+	idx, _ := d.TakeDirty()
+	if len(idx) > 64 {
+		t.Fatalf("format touched %d blocks; the disk should stay sparse", len(idx))
+	}
+}

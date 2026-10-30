@@ -11,11 +11,13 @@ import (
 
 	"bootlet/emulator/devices"
 	"bootlet/emulator/machine"
+	"bootlet/emulator/netstack"
 )
 
 var (
 	m    *machine.Machine
 	disk *devices.Disk
+	wisp *netstack.WispUpstream
 )
 
 func main() {
@@ -28,6 +30,11 @@ func main() {
 	api.Set("input", js.FuncOf(input))
 	api.Set("attachDisk", js.FuncOf(attachDisk))
 	api.Set("takeDirty", js.FuncOf(takeDirty))
+	api.Set("resetDisk", js.FuncOf(resetDisk))
+	api.Set("attachNet", js.FuncOf(attachNet))
+	api.Set("netInput", js.FuncOf(netInput))
+	api.Set("netOutput", js.FuncOf(netOutput))
+	api.Set("netDisconnected", js.FuncOf(netDisconnected))
 	js.Global().Set("bootlet", api)
 	select {}
 }
@@ -45,14 +52,18 @@ func bytesFrom(v js.Value) []byte {
 	return b
 }
 
-// create(ramMiB: number, cmdline: string)
+// create(ramMiB: number, cmdline: string, quiet: boolean). An empty
+// cmdline uses the default; quiet hides the kernel's boot log.
 func create(_ js.Value, args []js.Value) any {
-	cfg := machine.Config{}
+	cfg := machine.Config{Cmdline: machine.DefaultCmdline}
 	if len(args) > 0 && args[0].Truthy() {
 		cfg.RAMSize = uint64(args[0].Int()) << 20
 	}
 	if len(args) > 1 && args[1].Truthy() {
 		cfg.Cmdline = args[1].String()
+	}
+	if len(args) > 2 && args[2].Truthy() {
+		cfg.Cmdline += " " + machine.QuietCmdline
 	}
 	m = machine.New(cfg)
 	return nil
@@ -140,4 +151,46 @@ func takeDirty(js.Value, []js.Value) any {
 	jsData := js.Global().Get("Uint8Array").New(len(flat))
 	js.CopyBytesToJS(jsData, flat)
 	return map[string]any{"idx": jsIdx, "data": jsData}
+}
+
+// resetDisk(sizeMiB: number) replaces the disk with a freshly formatted one.
+// Call reset() afterwards.
+func resetDisk(_ js.Value, args []js.Value) any {
+	disk = devices.NewDisk(uint64(args[0].Int()) << 20)
+	disk.FormatExt2("bootlet")
+	m.ReplaceDisk(disk)
+	return nil
+}
+
+// attachNet() adds a network device whose TCP streams are carried as Wisp
+// packets; JavaScript moves them over the relay WebSocket. Call before reset().
+func attachNet(js.Value, []js.Value) any {
+	wisp = netstack.NewWispUpstream()
+	m.AttachNet(netstack.New(wisp))
+	return nil
+}
+
+// netInput(packet: Uint8Array) delivers one Wisp packet from the relay.
+func netInput(_ js.Value, args []js.Value) any {
+	wisp.Input(bytesFrom(args[0]))
+	return nil
+}
+
+// netOutput(): Uint8Array[] returns the Wisp packets to send to the relay.
+func netOutput(js.Value, []js.Value) any {
+	pkts := wisp.Output()
+	arr := js.Global().Get("Array").New(len(pkts))
+	for i, p := range pkts {
+		u := js.Global().Get("Uint8Array").New(len(p))
+		js.CopyBytesToJS(u, p)
+		arr.SetIndex(i, u)
+	}
+	return arr
+}
+
+// netDisconnected() must be called when the relay WebSocket closes: open
+// connections fail, and a new WebSocket starts a fresh Wisp session.
+func netDisconnected(js.Value, []js.Value) any {
+	wisp.Disconnected()
+	return nil
 }

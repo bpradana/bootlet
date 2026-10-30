@@ -19,9 +19,9 @@ sources = ["guest/manifest.toml", "guest/rootfs/**/*", "guest/tools/**/*.go"]
 outputs = ["guest/out/Image", "guest/out/initrd.cpio"]
 
 [tasks."emu:test"]
-description = "Go unit tests, including the official riscv-tests suites"
+description = "Go unit tests (emulator, network stack, relay, guest tools) and the official riscv-tests"
 depends = ["emu:riscv-tests"]
-run = ["go test ./packages/emulator/... ./guest/tools/..."]
+run = ["go test ./packages/emulator/... ./packages/shared/... ./apps/relay/... ./guest/tools/..."]
 
 [tasks."emu:riscv-tests"]
 description = "Clone and build the official riscv-tests ELFs with zig cc"
@@ -30,10 +30,18 @@ sources = ["scripts/build-riscv-tests.sh"]
 outputs = ["third_party/riscv-tests-build/rv64ui/add"]
 
 [tasks."emu:run"]
-description = "Boot the guest natively in this terminal (Ctrl-A x to quit); /data persists in guest/disk.img"
+description = "Boot the guest natively in this terminal with networking (Ctrl-A x quits); the root filesystem persists in guest/disk.img"
 depends = ["guest:fetch"]
 dir = "packages/emulator"
-run = "go run ./cmd/bootlet -kernel $GUEST_OUT/Image -initrd $GUEST_OUT/initrd.cpio -disk ../../guest/disk.img"
+run = "go run ./cmd/bootlet -kernel $GUEST_OUT/Image -initrd $GUEST_OUT/initrd.cpio -disk ../../guest/disk.img -net"
+
+[tasks."relay:dev"]
+description = "Run the Wisp network relay locally (open the page with ?relay=ws://localhost:8089/)"
+run = "go run ./apps/relay -addr :8089 -allow-private"
+
+[tasks."relay:docker"]
+description = "Build the relay container image"
+run = "docker build -f apps/relay/Dockerfile -t bootlet-relay ."
 
 [tasks."emu:boot-test"]
 description = "Boot the guest natively and run shell commands against it"
@@ -59,7 +67,7 @@ depends = ["guest:fetch"]
 run = "mkdir -p apps/frontend/public/guest && cp guest/out/Image.gz guest/out/initrd.cpio.gz apps/frontend/public/guest/"
 
 [tasks."web:dev"]
-description = "Start the frontend dev server"
+description = "Start the frontend dev server (add ?relay=ws://localhost:8089/ with relay:dev for networking)"
 depends = ["setup", "wasm:build", "web:assets"]
 dir = "apps/frontend"
 run = "pnpm dev"
@@ -79,8 +87,8 @@ run = ["pnpm exec playwright install chromium", "pnpm exec playwright test"]
 description = "gofmt + go vet + TypeScript typecheck"
 depends = ["setup"]
 run = [
-  "test -z \"$(gofmt -l packages guest)\" || (gofmt -l packages guest && exit 1)",
-  "go vet ./packages/emulator/... ./guest/tools/... && go vet -tags boot ./packages/emulator/machine",
+  "test -z \"$(gofmt -l packages apps guest)\" || (gofmt -l packages apps guest && exit 1)",
+  "go vet ./packages/emulator/... ./packages/shared/... ./apps/relay/... ./guest/tools/... && go vet -tags boot ./packages/emulator/machine",
   "cd packages/emulator && GOOS=js GOARCH=wasm go vet ./cmd/wasm",
   "pnpm -r typecheck",
 ]
