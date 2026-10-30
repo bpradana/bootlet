@@ -82,76 +82,108 @@ func (d *Disk) TakeDirty() (idx []uint64, data [][]byte) {
 	return idx, data
 }
 
-// FormatExt2 writes an empty ext2 filesystem (4 KiB blocks, one block group,
-// root directory and lost+found) to the disk. BusyBox has no mkfs.ext2, so a
-// fresh disk is formatted here instead of in the guest.
+// FormatExt2 writes an empty ext2 filesystem (4 KiB blocks, root directory
+// and lost+found) to the disk. BusyBox has no mkfs.ext2, so a fresh disk is
+// formatted here instead of in the guest. Every block group carries a copy
+// of the superblock and group descriptors (no sparse_super); only metadata
+// blocks are written, so the sparse disk stays small.
 func (d *Disk) FormatExt2(label string) {
 	const (
-		bs           = BlockSize
-		inodeSize    = 128
-		firstIno     = 11
-		bitmapBlk    = 2
-		inodeMapBlk  = 3
-		inodeTabBlk  = 4
-		blocksPerGrp = 8 * bs
+		bs        = BlockSize
+		bpg       = 8 * bs // blocks per group: one bitmap block's worth
+		inodeSize = 128
+		firstIno  = 11
 	)
-	blocks := uint32(min(d.size/bs, blocksPerGrp))
-	inodes := uint32(min(uint64(blocks)/4, 8*bs)) &^ 31
-	inodeTabBlocks := inodes * inodeSize / bs
-	rootBlk := inodeTabBlk + inodeTabBlocks
-	lfBlk := rootBlk + 1
-	used := lfBlk + 1
+	blocks := uint32(d.size / bs)
+	groups := (blocks + bpg - 1) / bpg
+	// One inode per 16 KiB, a whole number of inode-table blocks per group.
+	ipg := min(uint32(8192), min(blocks, bpg)/4) &^ (bs/inodeSize - 1)
+	itBlocks := ipg * inodeSize / bs
+	overhead := 4 + itBlocks // superblock, GDT, two bitmaps, inode table
+	if last := blocks - (groups-1)*bpg; groups > 1 && last < overhead+16 {
+		groups-- // drop a runt last group
+		blocks = groups * bpg
+	}
+	rootBlk, lfBlk := overhead, overhead+1
 	now := uint32(time.Now().Unix())
 	le := binary.LittleEndian
 
-	// Superblock (at byte 1024 of block 0).
-	sb := make([]byte, bs)
-	s := sb[1024:]
-	le.PutUint32(s[0:], inodes)
-	le.PutUint32(s[4:], blocks)
-	le.PutUint32(s[12:], blocks-used)
-	le.PutUint32(s[16:], inodes-firstIno)
-	le.PutUint32(s[20:], 0) // first data block
-	le.PutUint32(s[24:], 2) // log2(block size) - 10
-	le.PutUint32(s[28:], 2) // fragment size
-	le.PutUint32(s[32:], blocksPerGrp)
-	le.PutUint32(s[36:], blocksPerGrp)
-	le.PutUint32(s[40:], inodes)
-	le.PutUint32(s[48:], now)
-	le.PutUint16(s[54:], 0xffff) // max mount count: no forced fsck
-	le.PutUint16(s[56:], 0xef53)
-	le.PutUint16(s[58:], 1) // clean
-	le.PutUint16(s[60:], 1) // errors: continue
-	le.PutUint32(s[64:], now)
-	le.PutUint32(s[76:], 1) // revision 1 (dynamic)
-	le.PutUint32(s[84:], firstIno)
-	le.PutUint16(s[88:], inodeSize)
-	le.PutUint32(s[96:], 0x2) // incompat: filetype in directory entries
-	rand.Read(s[104:120])     // UUID
-	copy(s[120:136], label)
-	d.WriteAt(sb, 0)
+	groupBlocks := func(g uint32) uint32 { return min(bpg, blocks-g*bpg) }
+	usedIn := func(g uint32) uint32 {
+		if g == 0 {
+			return overhead + 2 // root and lost+found directories
+		}
+		return overhead
+	}
+	var freeBlocks uint32
+	for g := uint32(0); g < groups; g++ {
+		freeBlocks += groupBlocks(g) - usedIn(g)
+	}
 
-	// Group descriptor.
-	gd := make([]byte, bs)
-	le.PutUint32(gd[0:], bitmapBlk)
-	le.PutUint32(gd[4:], inodeMapBlk)
-	le.PutUint32(gd[8:], inodeTabBlk)
-	le.PutUint16(gd[12:], uint16(blocks-used))
-	le.PutUint16(gd[14:], uint16(inodes-firstIno))
-	le.PutUint16(gd[16:], 2) // directories
-	d.WriteAt(gd, bs)
+	sb := make([]byte, 1024)
+	le.PutUint32(sb[0:], ipg*groups)
+	le.PutUint32(sb[4:], blocks)
+	le.PutUint32(sb[12:], freeBlocks)
+	le.PutUint32(sb[16:], ipg*groups-firstIno)
+	le.PutUint32(sb[20:], 0) // first data block
+	le.PutUint32(sb[24:], 2) // log2(block size) - 10
+	le.PutUint32(sb[28:], 2) // fragment size
+	le.PutUint32(sb[32:], bpg)
+	le.PutUint32(sb[36:], bpg)
+	le.PutUint32(sb[40:], ipg)
+	le.PutUint32(sb[48:], now)
+	le.PutUint16(sb[54:], 0xffff) // max mount count: no forced fsck
+	le.PutUint16(sb[56:], 0xef53)
+	le.PutUint16(sb[58:], 1) // clean
+	le.PutUint16(sb[60:], 1) // errors: continue
+	le.PutUint32(sb[64:], now)
+	le.PutUint32(sb[76:], 1) // revision 1 (dynamic)
+	le.PutUint32(sb[84:], firstIno)
+	le.PutUint16(sb[88:], inodeSize)
+	le.PutUint32(sb[96:], 0x2) // incompat: filetype in directory entries
+	rand.Read(sb[104:120])     // UUID
+	copy(sb[120:136], label)
 
-	// Bitmaps: mark used entries and the padding past the end as in use.
-	bm := make([]byte, bs)
-	setBits(bm, 0, used)
-	setBits(bm, blocks, blocksPerGrp)
-	d.WriteAt(bm, bitmapBlk*bs)
-	im := make([]byte, bs)
-	setBits(im, 0, firstIno)
-	setBits(im, inodes, 8*bs)
-	d.WriteAt(im, inodeMapBlk*bs)
+	gdt := make([]byte, bs)
+	for g := uint32(0); g < groups; g++ {
+		base := g * bpg
+		e := gdt[32*g:]
+		le.PutUint32(e[0:], base+2) // block bitmap
+		le.PutUint32(e[4:], base+3) // inode bitmap
+		le.PutUint32(e[8:], base+4) // inode table
+		le.PutUint16(e[12:], uint16(groupBlocks(g)-usedIn(g)))
+		free := ipg
+		if g == 0 {
+			free -= firstIno
+			le.PutUint16(e[16:], 2) // directories
+		}
+		le.PutUint16(e[14:], uint16(free))
+	}
 
-	// Inodes 2 (root) and 11 (lost+found).
+	for g := uint32(0); g < groups; g++ {
+		base := uint64(g*bpg) * bs
+		copySB := append([]byte(nil), sb...)
+		le.PutUint16(copySB[90:], uint16(g)) // block group of this copy
+		if g == 0 {
+			d.WriteAt(copySB, 1024) // the primary sits 1 KiB into block 0
+		} else {
+			d.WriteAt(copySB, base)
+		}
+		d.WriteAt(gdt, base+bs)
+
+		bm := make([]byte, bs)
+		setBits(bm, 0, usedIn(g))
+		setBits(bm, groupBlocks(g), bpg) // past the end of a short last group
+		d.WriteAt(bm, base+2*bs)
+		im := make([]byte, bs)
+		if g == 0 {
+			setBits(im, 0, firstIno)
+		}
+		setBits(im, ipg, 8*bs)
+		d.WriteAt(im, base+3*bs)
+	}
+
+	// Inodes 2 (root) and 11 (lost+found), in group 0's inode table.
 	dirInode := func(ino uint32, mode uint16, links uint16, blk uint32) {
 		in := make([]byte, inodeSize)
 		le.PutUint16(in[0:], mode)
@@ -162,12 +194,11 @@ func (d *Disk) FormatExt2(label string) {
 		le.PutUint16(in[26:], links)
 		le.PutUint32(in[28:], bs/512)
 		le.PutUint32(in[40:], blk)
-		d.WriteAt(in, uint64(inodeTabBlk)*bs+uint64(ino-1)*inodeSize)
+		d.WriteAt(in, 4*bs+uint64(ino-1)*inodeSize)
 	}
 	dirInode(2, 0o40755, 3, rootBlk)
 	dirInode(firstIno, 0o40700, 2, lfBlk)
 
-	// Directory contents.
 	dirent := func(b []byte, ino uint32, recLen uint16, name string) {
 		le.PutUint32(b[0:], ino)
 		le.PutUint16(b[4:], recLen)

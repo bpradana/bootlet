@@ -1,22 +1,28 @@
 // Runs the Go/WASM emulator off the main thread. The emulator executes in
 // short slices; between slices the worker posts console output and handles
 // incoming messages, and while the guest idles (wfi) it sleeps until the next
-// timer event or keyboard input.
+// timer event, keystroke or network packet. With a relay configured, the
+// guest's TCP connections travel as Wisp packets over a WebSocket.
 import "./vendor/wasm_exec.js";
 import { assets, type FromWorker, type ToWorker } from "@bootlet/shared";
 import { openStore, type BlockStore } from "./storage";
 
 const SLICE_MS = 12;
-const DISK_MIB = 64;
+const DISK_MIB = 1024; // sparse: only written blocks are stored
 const SAVE_INTERVAL_MS = 2000;
 
 let api: BootletAPI | undefined;
 let baseURL = "";
+let relayURL = "";
+let memMiB = 0;
+let quiet = false;
+let ws: WebSocket | undefined;
+let reconnectDelay = 1000;
 let booting: Promise<void> | undefined;
 let running = false;
 let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let store: BlockStore | undefined;
-let saving = false;
+let saving: Promise<void> | undefined;
 let instructions = 0;
 let statsSince = performance.now();
 
@@ -69,7 +75,7 @@ async function boot() {
   ]);
   void go.run(wasm.instance); // returns once Go's main blocks; the API is then registered
   api = (globalThis as unknown as { bootlet: BootletAPI }).bootlet;
-  api.create(0, "");
+  api.create(memMiB, "", quiet);
   check(api.loadKernel(kernel));
   api.loadInitrd(initrd);
   const d = await disk;
@@ -81,6 +87,12 @@ async function boot() {
   } else {
     post({ type: "storage", backend: "none", detail: d.error });
   }
+  if (relayURL) {
+    api.attachNet();
+    connectRelay();
+  } else {
+    post({ type: "net", state: "off" });
+  }
   check(api.reset());
   post({ type: "state", state: "booting" });
 }
@@ -90,13 +102,51 @@ async function save() {
   if (!api || !store || saving) return;
   const dirty = api.takeDirty();
   if (!dirty) return;
-  saving = true;
+  saving = store
+    .save(dirty)
+    .catch((e) => post({ type: "storage", backend: "none", detail: `saving failed: ${e}` }))
+    .finally(() => (saving = undefined));
+  await saving;
+}
+
+function connectRelay() {
+  post({ type: "net", state: "connecting" });
+  let socket: WebSocket;
   try {
-    await store.save(dirty);
+    socket = new WebSocket(relayURL);
   } catch (e) {
-    post({ type: "storage", backend: "none", detail: `saving failed: ${e}` });
-  } finally {
-    saving = false;
+    post({ type: "net", state: "offline" });
+    return;
+  }
+  socket.binaryType = "arraybuffer";
+  ws = socket;
+  socket.onopen = () => {
+    reconnectDelay = 1000;
+    post({ type: "net", state: "online" });
+  };
+  socket.onmessage = (ev: MessageEvent<ArrayBuffer>) => {
+    api?.netInput(new Uint8Array(ev.data));
+    flushNet();
+    wake();
+  };
+  socket.onclose = () => {
+    if (ws !== socket) return;
+    ws = undefined;
+    api?.netDisconnected(); // open connections fail; the guest sees resets
+    post({ type: "net", state: "offline" });
+    wake();
+    setTimeout(connectRelay, reconnectDelay);
+    reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
+  };
+}
+
+// flushNet sends the emulator's pending Wisp packets to the relay. The Wisp
+// client produces nothing until the relay's greeting arrives, so packets are
+// only ever pending while the socket is open.
+function flushNet() {
+  if (!api || !relayURL) return;
+  for (const pkt of api.netOutput()) {
+    if (ws?.readyState === WebSocket.OPEN) ws.send(pkt);
   }
 }
 
@@ -109,6 +159,7 @@ function slice() {
   idleTimer = undefined;
   const r = api.run(SLICE_MS);
   if (r.output.length > 0) post({ type: "output", data: r.output }, [r.output.buffer]);
+  flushNet();
   instructions += r.instructions;
   const now = performance.now();
   if (now - statsSince > 1000) {
@@ -161,7 +212,12 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
   const msg = ev.data;
   switch (msg.type) {
     case "start":
-      baseURL ||= msg.base;
+      if (!booting) {
+        baseURL = msg.base;
+        relayURL = msg.relay;
+        memMiB = msg.memMiB;
+        quiet = msg.quiet;
+      }
       await start();
       break;
     case "stop":
@@ -172,6 +228,16 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
     case "restart":
       if (!api) return start();
       pause();
+      check(api.reset());
+      post({ type: "state", state: "booting" });
+      await start();
+      break;
+    case "resetDisk":
+      if (!api || !store) return;
+      pause();
+      await saving; // don't let an in-flight save land after the wipe
+      await store.clear();
+      api.resetDisk(DISK_MIB);
       check(api.reset());
       post({ type: "state", state: "booting" });
       await start();

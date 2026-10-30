@@ -1,6 +1,8 @@
 go 1.27.3
 
 use (
+	./apps/relay
 	./guest/tools
 	./packages/emulator
+	./packages/shared
 )

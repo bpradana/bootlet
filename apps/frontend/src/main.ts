@@ -2,12 +2,23 @@ import "@xterm/xterm/css/xterm.css";
 import "./style.css";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { shellPrompt, type FromWorker, type ToWorker, type VMState } from "@bootlet/shared";
+import { shellPrompt, type FromWorker, type NetState, type ToWorker, type VMState } from "@bootlet/shared";
 
 const statusEl = document.getElementById("status")!;
 const statusText = document.getElementById("status-text")!;
 const toggleBtn = document.getElementById("toggle") as HTMLButtonElement;
 const restartBtn = document.getElementById("restart") as HTMLButtonElement;
+const resetDiskBtn = document.getElementById("reset-disk") as HTMLButtonElement;
+const netEl = document.getElementById("net")!;
+
+// ?relay=wss://host/ (or VITE_RELAY_URL at build time) enables networking
+// through a Wisp relay; ?relay= with no value turns it off. ?mem=256 sets RAM,
+// and ?quiet hides the kernel's boot log.
+const params = new URLSearchParams(location.search);
+const relay = params.get("relay") ?? import.meta.env.VITE_RELAY_URL ?? "";
+const memMiB = Number(params.get("mem")) || 0;
+const quiet = params.has("quiet");
+const startMsg: ToWorker = { type: "start", base: document.baseURI, relay, memMiB, quiet };
 
 const term = new Terminal({
   fontFamily: 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
@@ -34,6 +45,14 @@ let booted = false; // shell prompt seen since the last (re)boot
 let mips = 0;
 let progressLine = false;
 let recent = ""; // tail of console output, to spot the prompt across chunks
+let persistent = false;
+
+const netLabels: Record<NetState, string> = {
+  off: "Network off",
+  connecting: "Connecting…",
+  online: "Online",
+  offline: "Offline",
+};
 
 function render() {
   statusEl.dataset.state = state === "running" && !booted ? "booting" : state;
@@ -62,6 +81,7 @@ function render() {
   toggleBtn.disabled = state === "loading" || state === "error";
   toggleBtn.textContent = state === "stopped" || state === "halted" ? "Start" : "Stop";
   restartBtn.disabled = state === "loading" || state === "error";
+  resetDiskBtn.disabled = restartBtn.disabled || !persistent;
 }
 
 const mb = (n: number) => (n / 1048576).toFixed(1);
@@ -92,10 +112,19 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     }
     case "storage":
-      statusEl.title =
-        msg.backend === "none"
-          ? `/data is not persistent: ${msg.detail ?? "browser storage unavailable"}`
-          : `/data is saved in this browser (${msg.backend === "opfs" ? "Origin Private File System" : "IndexedDB"})`;
+      persistent = msg.backend !== "none";
+      statusEl.title = persistent
+        ? `Filesystem changes are saved in this browser (${msg.backend === "opfs" ? "Origin Private File System" : "IndexedDB"})`
+        : `Changes are not saved: ${msg.detail ?? "browser storage unavailable"}`;
+      render();
+      break;
+    case "net":
+      netEl.dataset.state = msg.state;
+      netEl.textContent = netLabels[msg.state];
+      netEl.title =
+        msg.state === "off"
+          ? "No network relay configured. Open the page with ?relay=wss://<relay>/ to enable networking."
+          : `Wisp relay: ${relay}`;
       break;
     case "stats":
       mips = msg.mips;
@@ -120,7 +149,7 @@ toggleBtn.onclick = () => {
   if (state === "halted") {
     restart();
   } else if (state === "stopped") {
-    send({ type: "start", base: document.baseURI });
+    send(startMsg);
   } else {
     send({ type: "stop" });
   }
@@ -137,6 +166,13 @@ restartBtn.onclick = () => {
   term.focus();
 };
 
+resetDiskBtn.onclick = () => {
+  if (!confirm("Wipe the saved filesystem (installed packages, files, settings) and reboot from a clean system?")) return;
+  term.reset();
+  send({ type: "resetDisk" });
+  term.focus();
+};
+
 render();
-send({ type: "start", base: document.baseURI });
+send(startMsg);
 term.focus();

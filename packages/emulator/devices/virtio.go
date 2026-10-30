@@ -2,11 +2,9 @@ package devices
 
 import "encoding/binary"
 
-// VirtioBlock is a virtio-mmio (version 2) block device with a single split
-// virtqueue. Requests are completed synchronously when the driver notifies.
-type VirtioBlock struct {
-	Disk *Disk
-
+// Virtio is a virtio-mmio (version 2) transport with split virtqueues. The
+// device-specific behaviour (block, net) is supplied by a virtioDevice.
+type Virtio struct {
 	// RAM and RAMBase give the device DMA access to guest physical memory.
 	RAM     []byte
 	RAMBase uint64
@@ -14,51 +12,83 @@ type VirtioBlock struct {
 	// IRQ is called when the interrupt line changes.
 	IRQ func(level bool)
 
+	dev                    virtioDevice
 	devFeatSel, drvFeatSel uint32
 	drvFeatures            uint64
 	status                 uint32
 	intStatus              uint32
-	queueNum               uint32
-	queueReady             bool
-	desc, avail, used      uint64
-	lastAvail              uint16
+	queueSel               uint32
+	queues                 []virtqueue
+}
+
+type virtioDevice interface {
+	deviceID() uint32
+	features() uint64
+	config(off uint64) byte
+	// notify is called when the driver kicks queue q.
+	notify(q int)
+}
+
+type virtqueue struct {
+	num               uint32
+	ready             bool
+	desc, avail, used uint64
+	lastAvail         uint16
+}
+
+type descriptor struct {
+	addr  uint64
+	len   uint32
+	flags uint16
 }
 
 const (
-	virtioQueueMax = 128
+	virtioQueueMax = 256
 	virtioF1       = 1 << 32 // VIRTIO_F_VERSION_1
 
 	descFNext  = 1
 	descFWrite = 2
-
-	blkTIn    = 0
-	blkTOut   = 1
-	blkTFlush = 4
-	blkTGetID = 8
 )
 
-// Reset returns the device to its initial state (the disk is kept).
-func (v *VirtioBlock) Reset() {
-	*v = VirtioBlock{Disk: v.Disk, RAM: v.RAM, RAMBase: v.RAMBase, IRQ: v.IRQ}
+func newVirtio(dev virtioDevice, queues int, ram []byte, ramBase uint64) *Virtio {
+	return &Virtio{dev: dev, queues: make([]virtqueue, queues), RAM: ram, RAMBase: ramBase}
+}
+
+// Reset returns the transport to its initial state.
+func (v *Virtio) Reset() {
+	v.devFeatSel, v.drvFeatSel, v.drvFeatures = 0, 0, 0
+	v.status, v.intStatus, v.queueSel = 0, 0, 0
+	clear(v.queues)
 	v.update()
 }
 
-func (v *VirtioBlock) Read(off uint64, _ int) (uint64, bool) {
+func (v *Virtio) queue() *virtqueue {
+	if int(v.queueSel) < len(v.queues) {
+		return &v.queues[v.queueSel]
+	}
+	return nil
+}
+
+func (v *Virtio) Read(off uint64, size int) (uint64, bool) {
+	q := v.queue()
 	switch off {
 	case 0x000:
 		return 0x74726976, true // "virt"
 	case 0x004:
 		return 2, true
 	case 0x008:
-		return 2, true // block device
+		return uint64(v.dev.deviceID()), true
 	case 0x00c:
 		return 0x554d4551, true
 	case 0x010:
-		return (virtioF1 >> (32 * v.devFeatSel)) & 0xffffffff, true
+		return (v.dev.features() >> (32 * v.devFeatSel)) & 0xffffffff, true
 	case 0x034:
+		if q == nil {
+			return 0, true
+		}
 		return virtioQueueMax, true
 	case 0x044:
-		if v.queueReady {
+		if q != nil && q.ready {
 			return 1, true
 		}
 		return 0, true
@@ -68,16 +98,22 @@ func (v *VirtioBlock) Read(off uint64, _ int) (uint64, bool) {
 		return uint64(v.status), true
 	case 0x0fc:
 		return 0, true // config generation
-	case 0x100: // capacity in 512-byte sectors (low, high)
-		return (v.Disk.Size() / 512) & 0xffffffff, true
-	case 0x104:
-		return (v.Disk.Size() / 512) >> 32, true
+	}
+	if off >= 0x100 {
+		var val uint64
+		for i := 0; i < size; i++ {
+			val |= uint64(v.dev.config(off-0x100+uint64(i))) << (8 * i)
+		}
+		return val, true
 	}
 	return 0, true
 }
 
-func (v *VirtioBlock) Write(off uint64, _ int, val uint64) bool {
+func (v *Virtio) Write(off uint64, _ int, val uint64) bool {
 	x := uint32(val)
+	q := v.queue()
+	setLo := func(p *uint64) { *p = *p&^0xffffffff | uint64(x) }
+	setHi := func(p *uint64) { *p = *p&0xffffffff | uint64(x)<<32 }
 	switch off {
 	case 0x014:
 		v.devFeatSel = x & 1
@@ -86,13 +122,12 @@ func (v *VirtioBlock) Write(off uint64, _ int, val uint64) bool {
 		v.drvFeatures = v.drvFeatures&^(0xffffffff<<shift) | uint64(x)<<shift
 	case 0x024:
 		v.drvFeatSel = x
-	case 0x030: // queue select: only queue 0 exists
-	case 0x038:
-		v.queueNum = min(x, virtioQueueMax)
-	case 0x044:
-		v.queueReady = x&1 != 0
+	case 0x030:
+		v.queueSel = x
 	case 0x050:
-		v.process()
+		if int(x) < len(v.queues) {
+			v.dev.notify(int(x))
+		}
 	case 0x064:
 		v.intStatus &^= x
 		v.update()
@@ -102,30 +137,45 @@ func (v *VirtioBlock) Write(off uint64, _ int, val uint64) bool {
 			return true
 		}
 		v.status = x
+	}
+	if q == nil {
+		return true
+	}
+	switch off {
+	case 0x038:
+		q.num = min(x, virtioQueueMax)
+	case 0x044:
+		q.ready = x&1 != 0
 	case 0x080:
-		v.desc = v.desc&^0xffffffff | uint64(x)
+		setLo(&q.desc)
 	case 0x084:
-		v.desc = v.desc&0xffffffff | uint64(x)<<32
+		setHi(&q.desc)
 	case 0x090:
-		v.avail = v.avail&^0xffffffff | uint64(x)
+		setLo(&q.avail)
 	case 0x094:
-		v.avail = v.avail&0xffffffff | uint64(x)<<32
+		setHi(&q.avail)
 	case 0x0a0:
-		v.used = v.used&^0xffffffff | uint64(x)
+		setLo(&q.used)
 	case 0x0a4:
-		v.used = v.used&0xffffffff | uint64(x)<<32
+		setHi(&q.used)
 	}
 	return true
 }
 
-func (v *VirtioBlock) update() {
+func (v *Virtio) update() {
 	if v.IRQ != nil {
 		v.IRQ(v.intStatus != 0)
 	}
 }
 
+// interrupt signals a used-buffer notification.
+func (v *Virtio) interrupt() {
+	v.intStatus |= 1
+	v.update()
+}
+
 // mem returns the guest memory at physical address pa, or nil.
-func (v *VirtioBlock) mem(pa, n uint64) []byte {
+func (v *Virtio) mem(pa, n uint64) []byte {
 	off := pa - v.RAMBase
 	if off >= uint64(len(v.RAM)) || off+n > uint64(len(v.RAM)) {
 		return nil
@@ -133,55 +183,27 @@ func (v *VirtioBlock) mem(pa, n uint64) []byte {
 	return v.RAM[off : off+n]
 }
 
-// process completes every request the driver has made available.
-func (v *VirtioBlock) process() {
-	if !v.queueReady || v.queueNum == 0 {
-		return
+// pop takes the next available descriptor chain from queue qi.
+func (v *Virtio) pop(qi int) (head uint16, chain []descriptor, ok bool) {
+	q := &v.queues[qi]
+	if !q.ready || q.num == 0 {
+		return 0, nil, false
 	}
 	le := binary.LittleEndian
-	availIdx := v.mem(v.avail+2, 2)
-	if availIdx == nil {
-		return
+	availIdx := v.mem(q.avail+2, 2)
+	if availIdx == nil || q.lastAvail == le.Uint16(availIdx) {
+		return 0, nil, false
 	}
-	for v.lastAvail != le.Uint16(availIdx) {
-		slot := v.mem(v.avail+4+2*uint64(uint32(v.lastAvail)%v.queueNum), 2)
-		if slot == nil {
-			return
-		}
-		head := le.Uint16(slot)
-		written := v.request(head)
-		usedIdx := v.mem(v.used+2, 2)
-		if usedIdx == nil {
-			return
-		}
-		elem := v.mem(v.used+4+8*uint64(uint32(le.Uint16(usedIdx))%v.queueNum), 8)
-		if elem == nil {
-			return
-		}
-		le.PutUint32(elem, uint32(head))
-		le.PutUint32(elem[4:], written)
-		le.PutUint16(usedIdx, le.Uint16(usedIdx)+1)
-		v.lastAvail++
+	slot := v.mem(q.avail+4+2*uint64(uint32(q.lastAvail)%q.num), 2)
+	if slot == nil {
+		return 0, nil, false
 	}
-	v.intStatus |= 1
-	v.update()
-}
-
-type descriptor struct {
-	addr  uint64
-	len   uint32
-	flags uint16
-}
-
-// request executes the block request whose descriptor chain starts at head
-// and returns the number of bytes written into device-writable buffers.
-func (v *VirtioBlock) request(head uint16) uint32 {
-	le := binary.LittleEndian
-	var chain []descriptor
-	for i, idx := 0, head; i < int(v.queueNum); i++ {
-		d := v.mem(v.desc+16*uint64(uint32(idx)%v.queueNum), 16)
+	q.lastAvail++
+	head = le.Uint16(slot)
+	for i, idx := 0, head; i < int(q.num); i++ {
+		d := v.mem(q.desc+16*uint64(uint32(idx)%q.num), 16)
 		if d == nil {
-			return 0
+			break
 		}
 		chain = append(chain, descriptor{le.Uint64(d), le.Uint32(d[8:]), le.Uint16(d[12:])})
 		if le.Uint16(d[12:])&descFNext == 0 {
@@ -189,46 +211,23 @@ func (v *VirtioBlock) request(head uint16) uint32 {
 		}
 		idx = le.Uint16(d[14:])
 	}
-	if len(chain) < 2 {
-		return 0
+	return head, chain, true
+}
+
+// push returns a descriptor chain to the driver with the number of bytes
+// written into its device-writable buffers.
+func (v *Virtio) push(qi int, head uint16, written uint32) {
+	q := &v.queues[qi]
+	le := binary.LittleEndian
+	usedIdx := v.mem(q.used+2, 2)
+	if usedIdx == nil {
+		return
 	}
-	hdr := v.mem(chain[0].addr, 16)
-	last := chain[len(chain)-1]
-	statusByte := v.mem(last.addr, 1)
-	if hdr == nil || statusByte == nil {
-		return 0
+	elem := v.mem(q.used+4+8*uint64(uint32(le.Uint16(usedIdx))%q.num), 8)
+	if elem == nil {
+		return
 	}
-	typ, sector := le.Uint32(hdr), le.Uint64(hdr[8:])
-	data := chain[1 : len(chain)-1]
-	pos := sector * 512
-	var written uint32
-	status := byte(0)
-	switch typ {
-	case blkTIn, blkTOut:
-		for _, d := range data {
-			buf := v.mem(d.addr, uint64(d.len))
-			if buf == nil || pos+uint64(d.len) > v.Disk.Size() {
-				status = 1 // IOERR
-				break
-			}
-			if typ == blkTIn {
-				v.Disk.ReadAt(buf, pos)
-				written += d.len
-			} else {
-				v.Disk.WriteAt(buf, pos)
-			}
-			pos += uint64(d.len)
-		}
-	case blkTFlush:
-	case blkTGetID:
-		if len(data) > 0 {
-			if buf := v.mem(data[0].addr, uint64(data[0].len)); buf != nil {
-				written += uint32(copy(buf, "bootlet-disk\x00"))
-			}
-		}
-	default:
-		status = 2 // UNSUPP
-	}
-	statusByte[0] = status
-	return written + 1
+	le.PutUint32(elem, uint32(head))
+	le.PutUint32(elem[4:], written)
+	le.PutUint16(usedIdx, le.Uint16(usedIdx)+1)
 }

@@ -34,9 +34,18 @@ jobs:
       - name: Install Playwright system dependencies
         run: pnpm install && pnpm --dir apps/frontend exec playwright install --with-deps chromium
 
-      # lint, Go unit tests + riscv-tests, native boot test, production build,
-      # and the Playwright browser boot test.
+      # lint, Go unit tests + riscv-tests, native boot test (including an
+      # `apk add` from the Alpine mirror), production build, and the Playwright
+      # browser tests (boot, persistence, networking through a local relay).
       - run: mise run test
+        env:
+          BOOTLET_ONLINE: "1"
+          # Optional default relay for the deployed site: set the repository
+          # variable RELAY_URL (Settings → Secrets and variables → Actions).
+          VITE_RELAY_URL: ${{ vars.RELAY_URL }}
+
+      - name: Build the relay image
+        run: docker build -f apps/relay/Dockerfile -t bootlet-relay .
 
       - uses: actions/upload-pages-artifact@v4
         with:

@@ -1,18 +1,33 @@
 #!/bin/sh
-hostname -F /etc/hostname
-mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
-cat /etc/motd
+. /lib/bootlet-status.sh
 
-# Optional persistent disk: the emulator formats it as ext2 and the browser
-# saves it to OPFS/IndexedDB. Mount it in the background so the shell is not
-# delayed by loading the drivers.
-if [ -e /proc/device-tree/soc/virtio_mmio@10001000 ]; then
-  echo "  /data is persistent: files there survive reloads (stored in this browser)."
-  echo
-  (
-    for m in $(cat /lib/modules/load.list); do insmod "/lib/modules/$m"; done
-    i=0
-    while [ ! -b /dev/vda ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
-    mount -t ext2 -o sync,noatime /dev/vda /data
-  ) >/dev/null 2>&1 &
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+ok "Mounted /tmp, /run and /dev/pts."
+hostname -F /etc/hostname
+ok "Set hostname to $(hostname)."
+ip link set lo up
+ok "Brought up loopback interface lo."
+
+# Networking: user-mode NAT provided by the emulator (see README).
+if [ -e /sys/class/net/eth0 ]; then
+  ip link set eth0 up &&
+    ip addr add 10.0.2.15/24 dev eth0 &&
+    ip route add default via 10.0.2.2 &&
+    echo "nameserver 10.0.2.3" > /etc/resolv.conf &&
+    ok "Configured network eth0: 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3." ||
+    fail "Could not configure network interface eth0."
 fi
+ok "Started login shell on the serial console (ttyS0)."
+
+cat /etc/motd
+if [ -e /sys/class/net/eth0 ]; then
+  echo "  Network is up: try \`apk add python3\` or \`wget -qO- http://example.com\`."
+else
+  echo "  No network: open the page with ?relay=wss://<your relay>/ to enable it."
+fi
+if grep -q ' / overlay ' /proc/mounts; then
+  echo "  Changes to the filesystem are saved in this browser (toolbar: Reset disk)."
+fi
+echo

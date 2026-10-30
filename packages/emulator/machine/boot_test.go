@@ -4,6 +4,10 @@ package machine_test
 
 import (
 	"bytes"
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,10 +16,13 @@ import (
 
 	"bootlet/emulator/devices"
 	"bootlet/emulator/machine"
+	"bootlet/emulator/netstack"
 )
 
 // TestBoot boots the packed guest (mise run guest:fetch) and runs commands
-// in its shell. Run with: go test -tags boot -run TestBoot ./machine
+// in its shell: networking through the user-mode stack, and a persistent
+// root filesystem across a reboot. With BOOTLET_ONLINE=1 it also installs a
+// package from the Alpine mirror. Run with: go test -tags boot -run TestBoot ./machine
 func TestBoot(t *testing.T) {
 	dir := os.Getenv("GUEST_OUT")
 	if dir == "" {
@@ -30,7 +37,13 @@ func TestBoot(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	disk := devices.NewDisk(16 << 20)
+	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "hello from the host, path %s\n", r.URL.Path)
+	}))
+	defer web.Close()
+	webPort := web.Listener.Addr().(*net.TCPAddr).Port
+
+	disk := devices.NewDisk(256 << 20)
 	disk.FormatExt2("test")
 	m := machine.New(machine.Config{})
 	if err := m.LoadKernel(kernel); err != nil {
@@ -38,6 +51,7 @@ func TestBoot(t *testing.T) {
 	}
 	m.LoadInitrd(initrd)
 	m.AttachDisk(disk)
+	m.AttachNet(netstack.New(netstack.NewDirectUpstream()))
 	if err := m.Reset(); err != nil {
 		t.Fatal(err)
 	}
@@ -84,19 +98,36 @@ func TestBoot(t *testing.T) {
 		}
 	}
 
-	// The persistent disk is mounted at /data in the background; a file
-	// written there must survive a reboot.
+	// The gateway address reaches the host, like QEMU's user networking.
 	out.Reset()
-	m.Input([]byte("while ! mountpoint -q /data; do sleep 0.2; done; echo saved > /data/f; sync; echo wr''ote\n"))
+	m.Input([]byte(fmt.Sprintf("wget -qO- http://10.0.2.2:%d/guest; echo fe''tched\n", webPort)))
+	waitFor("fetched", time.Minute)
+	if !strings.Contains(out.String(), "hello from the host, path /guest") {
+		t.Errorf("HTTP through the network stack failed:\n%s", out.String())
+	}
+
+	if os.Getenv("BOOTLET_ONLINE") == "1" {
+		out.Reset()
+		m.Input([]byte("apk add lua5.4 >/dev/null && lua5.4 -e 'print(6*7)'; echo in''stalled\n"))
+		waitFor("installed", 5*time.Minute)
+		if !strings.Contains(out.String(), "42") {
+			t.Errorf("apk add from the Alpine mirror failed:\n%s", out.String())
+		}
+	}
+
+	// The root filesystem is an overlay on the disk: changes survive a reboot.
+	out.Reset()
+	m.Input([]byte("grep -q ' / overlay ' /proc/mounts && echo saved > /etc/marker; echo wr''ote\n"))
 	waitFor("wrote", time.Minute)
 	out.Reset()
 	m.Input([]byte("reboot\n"))
-	waitFor("root@bootlet:~# ", 2*time.Minute)
+	waitFor("Welcome to bootlet", 2*time.Minute) // printed only once the new boot starts
+	waitFor("root@bootlet:~# ", time.Minute)
 	out.Reset()
-	m.Input([]byte("while ! mountpoint -q /data; do sleep 0.2; done; cat /data/f; echo re''ad\n"))
+	m.Input([]byte("cat /etc/marker; echo re''ad\n"))
 	waitFor("read", time.Minute)
 	if !strings.Contains(out.String(), "saved") {
-		t.Errorf("file in /data did not survive reboot:\n%s", out.String())
+		t.Errorf("file did not survive reboot:\n%s", out.String())
 	}
 
 	out.Reset()

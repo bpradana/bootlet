@@ -11,6 +11,7 @@ import (
 	"bootlet/emulator/boot"
 	"bootlet/emulator/cpu"
 	"bootlet/emulator/devices"
+	"bootlet/emulator/netstack"
 )
 
 // Physical memory map (QEMU virt compatible).
@@ -22,13 +23,19 @@ const (
 	UARTIRQ   = 10
 	DiskBase  = 0x1000_1000
 	DiskIRQ   = 1
+	NetBase   = 0x1000_2000
+	NetIRQ    = 2
 	RTCBase   = 0x0010_1000
 
 	// TimebaseHz is the frequency of the time CSR.
 	TimebaseHz = 10_000_000
 
-	DefaultRAM     = 128 << 20
-	DefaultCmdline = "console=ttyS0 quiet loglevel=3 no4lvl unaligned_scalar_speed=fast cma=0 initcall_blacklist=jent_mod_init"
+	DefaultRAM = 128 << 20
+	// DefaultCmdline shows the full boot log from the first instruction
+	// (earlycon); the other options skip boot work that is pointless under
+	// emulation. Append QuietCmdline for a silent boot.
+	DefaultCmdline = "console=ttyS0 earlycon=sbi no4lvl unaligned_scalar_speed=fast cma=0 initcall_blacklist=jent_mod_init"
+	QuietCmdline   = "quiet loglevel=3"
 )
 
 type Config struct {
@@ -57,6 +64,8 @@ type Machine struct {
 	PLIC  *devices.PLIC
 	CLINT *devices.CLINT
 	Disk  *devices.VirtioBlock // nil unless AttachDisk was called
+	Net   *devices.VirtioNet   // nil unless AttachNet was called
+	stack *netstack.Stack
 	bus   devices.Bus
 
 	kernel, initrd []byte
@@ -111,9 +120,40 @@ func (m *Machine) LoadKernel(data []byte) error {
 
 // AttachDisk adds a virtio block device backed by d. Call it before Reset.
 func (m *Machine) AttachDisk(d *devices.Disk) {
-	m.Disk = &devices.VirtioBlock{Disk: d, RAM: m.RAM, RAMBase: RAMBase}
+	m.Disk = devices.NewVirtioBlock(d, m.RAM, RAMBase)
 	m.Disk.IRQ = func(level bool) { m.PLIC.SetLevel(DiskIRQ, level) }
 	m.bus.Map(DiskBase, 0x1000, m.Disk)
+}
+
+// ReplaceDisk swaps the disk behind the attached block device, e.g. to wipe
+// it. Call Reset afterwards so the guest starts from the new contents.
+func (m *Machine) ReplaceDisk(d *devices.Disk) {
+	m.Disk.Disk = d
+}
+
+// AttachNet adds a virtio network device connected to the user-mode network
+// s. Call it before Reset.
+func (m *Machine) AttachNet(s *netstack.Stack) {
+	m.stack = s
+	m.Net = devices.NewVirtioNet(netstack.GuestMAC, m.RAM, RAMBase)
+	m.Net.IRQ = func(level bool) { m.PLIC.SetLevel(NetIRQ, level) }
+	m.Net.TX = func(frame []byte) {
+		s.Receive(frame)
+		m.Net.Deliver(s.Frames()...)
+	}
+	m.bus.Map(NetBase, 0x1000, m.Net)
+}
+
+// pollNet moves upstream events (data, closes) into the guest; delivering
+// frames raises the device interrupt, which wakes a hart waiting in wfi.
+func (m *Machine) pollNet() {
+	if m.stack == nil {
+		return
+	}
+	m.stack.Poll()
+	if f := m.stack.Frames(); len(f) > 0 {
+		m.Net.Deliver(f...)
+	}
 }
 
 // LoadInitrd sets the initramfs passed to the kernel.
@@ -152,6 +192,10 @@ func (m *Machine) Reset() error {
 	m.CLINT.MSIP, m.CLINT.MTimecmp = false, ^uint64(0)
 	if m.Disk != nil {
 		m.Disk.Reset()
+	}
+	if m.Net != nil {
+		m.Net.Reset()
+		m.stack.Reset()
 	}
 	m.start = time.Now()
 	m.sbiTimer = ^uint64(0)
@@ -204,12 +248,16 @@ func (m *Machine) Run(budget time.Duration) Result {
 	deadline := m.now() + uint64(budget/(1e9/TimebaseHz))
 	for !m.halted {
 		m.tick()
+		m.pollNet()
 		res.Instructions += uint64(m.CPU.Run(chunk))
 		if m.reboot {
 			if err := m.Reset(); err != nil {
 				m.halted = true
 			}
 			continue
+		}
+		if m.CPU.WFI && m.stack != nil && m.stack.Busy() {
+			continue // network data arrived; deliver it on the next pass
 		}
 		if m.CPU.WFI {
 			// Nothing to do until the next enabled timer deadline or input.

@@ -1,7 +1,9 @@
 // Command guestpack builds the bootlet guest from prebuilt Alpine packages:
 // it downloads and verifies the pinned apks, extracts the kernel Image, checks
-// that the kernel config has everything the emulator relies on, and packs a
-// BusyBox initramfs. It needs no cross compiler and runs on any host.
+// that the kernel config has everything the emulator relies on, and packs an
+// initramfs with BusyBox, musl and apk, registered in apk's database so
+// `apk add` works in the guest. It needs no cross compiler and runs on any
+// host.
 package main
 
 import (
@@ -27,19 +29,19 @@ import (
 )
 
 type manifest struct {
-	Mirror string
-	Kernel struct {
+	Mirror  string
+	Busybox string // path of the BusyBox binary in the packages; installed as /bin/busybox
+	Kernel  struct {
 		Package  string
 		Sha256   string
 		Image    string
 		Required []string
 		Modules  []string
 	}
-	Busybox struct {
-		Package string
-		Sha256  string
-		Binary  string
-	}
+	Packages []struct {
+		Name   string
+		Sha256 string
+	} `toml:"package"`
 }
 
 func main() {
@@ -67,15 +69,14 @@ func main() {
 	image := kernelImage(kfiles[m.Kernel.Image].Data)
 	checkConfig(kfiles, m.Kernel.Required)
 
-	bpkg := fetch(m.Mirror, m.Busybox.Package, m.Busybox.Sha256, *cacheDir)
-	bfiles, err := apk.Extract(bytes.NewReader(bpkg), func(name string) bool { return name == m.Busybox.Binary })
-	must(err)
-	busybox, ok := bfiles[m.Busybox.Binary]
-	if !ok {
-		log.Fatalf("%s not found in %s", m.Busybox.Binary, m.Busybox.Package)
+	var pkgs []*apk.Package
+	for _, p := range m.Packages {
+		pkg, err := apk.Read(fetch(m.Mirror, p.Name, p.Sha256, *cacheDir), nil)
+		must(err)
+		pkgs = append(pkgs, pkg)
 	}
 
-	initrd := buildInitrd(busybox.Data, *rootfsDir, kfiles, m.Kernel.Modules)
+	initrd := buildInitrd(pkgs, m.Busybox, *rootfsDir, kfiles, m.Kernel.Modules)
 
 	write(filepath.Join(*outDir, "Image"), image)
 	write(filepath.Join(*outDir, "initrd.cpio"), initrd)
@@ -154,29 +155,84 @@ func checkConfig(files map[string]apk.File, required []string) {
 	}
 }
 
-func buildInitrd(busybox []byte, rootfsDir string, kfiles map[string]apk.File, modules []string) []byte {
-	var buf bytes.Buffer
-	w := cpio.NewWriter(&buf)
-	for _, d := range []string{"bin", "dev", "etc", "proc", "sys", "tmp", "run", "root", "usr", "mnt", "lib", "lib/modules", "data"} {
-		perm := uint32(0o755)
-		if d == "tmp" {
-			perm = 0o1777
-		}
-		must(w.Dir(d, perm))
-	}
-	// Merged /usr: everything lives in /bin.
-	must(w.Symlink("sbin", "bin"))
-	must(w.Symlink("usr/bin", "../bin"))
-	must(w.Symlink("usr/sbin", "../bin"))
-	must(w.CharDev("dev/console", 0o600, 5, 1))
-	must(w.CharDev("dev/null", 0o666, 1, 3))
+// tree writes an initramfs, creating parent directories on demand.
+type tree struct {
+	w    *cpio.Writer
+	dirs map[string]bool
+}
 
-	must(w.File("bin/busybox", 0o755, busybox))
+func (t *tree) parents(name string) {
+	if d := path.Dir(name); d != "." && !t.dirs[d] {
+		t.Dir(d, 0o755)
+	}
+}
+
+func (t *tree) Dir(name string, perm uint32) {
+	if t.dirs[name] {
+		return
+	}
+	t.parents(name)
+	t.dirs[name] = true
+	must(t.w.Dir(name, perm))
+}
+
+func (t *tree) File(name string, perm uint32, data []byte) {
+	t.parents(name)
+	must(t.w.File(name, perm, data))
+}
+
+func (t *tree) Symlink(name, target string) {
+	t.parents(name)
+	must(t.w.Symlink(name, target))
+}
+
+func buildInitrd(pkgs []*apk.Package, busyboxPath, rootfsDir string, kfiles map[string]apk.File, modules []string) []byte {
+	var buf bytes.Buffer
+	t := &tree{w: cpio.NewWriter(&buf), dirs: map[string]bool{}}
+	for _, d := range []string{"bin", "sbin", "usr/bin", "usr/sbin", "lib/modules", "dev", "etc", "proc", "sys",
+		"run", "root", "mnt", "var/cache/apk", "lib/apk/db"} {
+		t.Dir(d, 0o755)
+	}
+	t.Dir("tmp", 0o1777)
+	must(t.w.CharDev("dev/console", 0o600, 5, 1))
+	must(t.w.CharDev("dev/null", 0o666, 1, 3))
+
+	// Alpine packages, recorded in apk's database as installed.
+	var installed, world strings.Builder
+	var busybox []byte
+	for _, pkg := range pkgs {
+		for _, f := range pkg.Files {
+			switch {
+			case f.Dir:
+				t.Dir(f.Name, uint32(f.Mode))
+			case f.Linkname != "":
+				t.Symlink(f.Name, f.Linkname)
+			default:
+				t.File(f.Name, uint32(f.Mode), f.Data)
+				if f.Name == busyboxPath {
+					busybox = f.Data
+				}
+			}
+		}
+		installed.WriteString(pkg.InstalledRecord())
+		world.WriteString(pkg.Info["pkgname"][0] + "\n")
+	}
+	if busybox == nil {
+		log.Fatalf("busybox binary %s not found in the packages", busyboxPath)
+	}
+	t.File("lib/apk/db/installed", 0o644, []byte(installed.String()))
+	t.File("etc/apk/world", 0o644, []byte(world.String()))
+	t.File("etc/apk/arch", 0o644, []byte("riscv64\n"))
+	t.Symlink("sbin/apk", "apk.static")
+
+	// BusyBox applets all live in /bin (they are not owned by any package).
+	t.File("bin/busybox", 0o755, busybox)
 	for _, a := range applets(busybox) {
 		if a != "busybox" {
-			must(w.Symlink("bin/"+a, "busybox"))
+			t.Symlink("bin/"+a, "busybox")
 		}
 	}
+	t.Symlink("sbin/init", "../bin/busybox")
 
 	if len(modules) > 0 {
 		order := resolveModules(kfiles, modules)
@@ -190,14 +246,14 @@ func buildInitrd(busybox []byte, rootfsDir string, kfiles map[string]apk.File, m
 			}
 			data = stripSignature(data)
 			base := strings.TrimSuffix(path.Base(name), ".gz")
-			must(w.File("lib/modules/"+base, 0o644, data))
+			t.File("lib/modules/"+base, 0o644, data)
 			list = append(list, base)
 		}
 		// The guest loads these in order with insmod (no modprobe/depmod needed).
-		must(w.File("lib/modules/load.list", 0o644, []byte(strings.Join(list, "\n")+"\n")))
+		t.File("lib/modules/load.list", 0o644, []byte(strings.Join(list, "\n")+"\n"))
 	}
 
-	// Overlay last so it can add files under the directories created above.
+	// The rootfs overlay goes last so it can override package files.
 	must(filepath.WalkDir(rootfsDir, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || p == rootfsDir {
 			return err
@@ -206,21 +262,19 @@ func buildInitrd(busybox []byte, rootfsDir string, kfiles map[string]apk.File, m
 		info := must2(d.Info())
 		switch {
 		case d.IsDir():
-			if rel == "etc" {
-				return nil // already created
-			}
-			return w.Dir(rel, 0o755)
+			t.Dir(rel, 0o755)
 		case info.Mode()&fs.ModeSymlink != 0:
-			return w.Symlink(rel, must2(os.Readlink(p)))
+			t.Symlink(rel, must2(os.Readlink(p)))
 		default:
 			perm := uint32(0o644)
 			if info.Mode()&0o111 != 0 {
 				perm = 0o755
 			}
-			return w.File(rel, perm, must2(os.ReadFile(p)))
+			t.File(rel, perm, must2(os.ReadFile(p)))
 		}
+		return nil
 	}))
-	must(w.Close())
+	must(t.w.Close())
 	return buf.Bytes()
 }
 

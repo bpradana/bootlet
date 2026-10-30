@@ -94,5 +94,13 @@ func (m *Machine) deviceTree(initrdStart, initrdEnd uint64) []byte {
 			Add("interrupts", fdt.U32(DiskIRQ))
 	}
 
+	if m.Net != nil {
+		soc.Child("virtio_mmio@10002000").
+			Add("compatible", fdt.Str("virtio,mmio")).
+			Add("reg", fdt.U64(NetBase, 0x1000)).
+			Add("interrupt-parent", fdt.U32(phandlePLIC)).
+			Add("interrupts", fdt.U32(NetIRQ))
+	}
+
 	return fdt.Encode(root, 0)
 }

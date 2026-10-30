@@ -2,6 +2,9 @@
 # guestpack downloads these, verifies them, and packs a kernel Image + initramfs.
 mirror = "https://dl-cdn.alpinelinux.org/alpine/v3.24"
 
+# Installed as /bin/busybox, with a link per applet in /bin.
+busybox = "bin/busybox.static"
+
 [kernel]
 package = "main/linux-lts-6.18.59-r0.apk"
 sha256 = "c3556340be3a6ed9041dd3574a4a6255ffad3a81e1cbc15e73409d621cb8c55e"
@@ -9,18 +12,38 @@ image = "boot/vmlinuz-lts"
 # Options the emulator depends on. guestpack fails if any is not built in (=y).
 required = [
   "SERIAL_8250", "SERIAL_8250_CONSOLE", "SERIAL_OF_PLATFORM", "SERIAL_EARLYCON_RISCV_SBI",
-  "SIFIVE_PLIC", "RISCV_TIMER", "RISCV_SBI_V01", "FPU",
+  "SIFIVE_PLIC", "RISCV_TIMER", "RISCV_SBI_V01", "FPU", "INET", "RTC_DRV_GOLDFISH",
   "BLK_DEV_INITRD", "DEVTMPFS", "TMPFS", "BINFMT_ELF",
 ]
 # Loadable modules copied into the initramfs (paths below lib/modules/<version>/),
-# with their dependencies. Used for the optional persistent disk at /data.
+# with their dependencies: the persistent root disk (virtio-blk, ext4, overlay)
+# and networking (virtio-net).
 modules = [
   "kernel/drivers/virtio/virtio_mmio.ko.gz",
   "kernel/drivers/block/virtio_blk.ko.gz",
   "kernel/fs/ext4/ext4.ko.gz",
+  "kernel/fs/overlayfs/overlay.ko.gz",
+  "kernel/drivers/net/virtio_net.ko.gz",
 ]
 
-[busybox]
-package = "main/busybox-static-1.37.0-r31.apk"
+# Userland. Every package is unpacked into the initramfs and recorded in apk's
+# installed database, so `apk add` resolves dependencies against them.
+[[package]]
+name = "main/busybox-static-1.37.0-r31.apk"
 sha256 = "300ecf7530b06c0dfaf56e8b7ed2bba9ccebac58984914518d77cc1a39a21413"
-binary = "bin/busybox.static"
+
+[[package]]
+name = "main/musl-1.2.6-r3.apk"
+sha256 = "f21b18f22a511de1e57f70112f761d0daad0c7d74e0734a82fcd5e037387dbb4"
+
+[[package]]
+name = "main/apk-tools-static-3.0.8-r0.apk"
+sha256 = "52cec13ecb4278523a8a4c4f7c23aff77733bd278ba0b3c23f0e21643dbb531e"
+
+[[package]]
+name = "main/alpine-keys-2.6-r0.apk"
+sha256 = "292ef431f958809d9e862cd90d86eea417f92b2fb8f629b34ebe4563d1342a81"
+
+[[package]]
+name = "main/ca-certificates-bundle-20261020-r0.apk"
+sha256 = "85fe5ddecef8de77fcf6e2dc3c74e600425b32e85aabd69aa59cb37f31d8aaa2"
