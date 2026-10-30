@@ -1,0 +1,94 @@
+package devices
+
+import "testing"
+
+func TestPLICClaimComplete(t *testing.T) {
+	p := NewPLIC()
+	var line [2]bool
+	p.Line = func(ctx int, level bool) { line[ctx] = level }
+	p.Write(10*4, 4, 1)       // priority of source 10
+	p.Write(0x2080, 4, 1<<10) // enable source 10 for context 1 (S-mode)
+	p.Write(0x201000, 4, 0)   // threshold 0
+	p.SetLevel(10, true)
+	if !line[1] || line[0] {
+		t.Fatalf("lines = %v, want only S-mode raised", line)
+	}
+	if v, _ := p.Read(0x201004, 4); v != 10 {
+		t.Fatalf("claim = %d, want 10", v)
+	}
+	if line[1] {
+		t.Fatal("line still raised while the source is claimed")
+	}
+	p.Write(0x201004, 4, 10) // complete with the level still high
+	if !line[1] {
+		t.Fatal("level-triggered source not re-raised after complete")
+	}
+	p.SetLevel(10, false)
+	if line[1] {
+		t.Fatal("line raised with no pending source")
+	}
+}
+
+func TestUARTInterrupts(t *testing.T) {
+	u := NewUART()
+	var irq bool
+	u.IRQ = func(level bool) { irq = level }
+
+	u.Write8(1, ierRDI)
+	u.Input([]byte("hi"))
+	if !irq {
+		t.Fatal("no interrupt for received data")
+	}
+	if v, _ := u.Read(2, 1); v&0x0f != 0x04 {
+		t.Fatalf("IIR = %#x, want RDA", v)
+	}
+	if v, _ := u.Read(5, 1); v&lsrDR == 0 {
+		t.Fatal("LSR.DR not set")
+	}
+	u.Read(0, 1)
+	u.Read(0, 1)
+	if irq {
+		t.Fatal("interrupt still raised after draining input")
+	}
+
+	// THRE: enabling it raises an interrupt that reading IIR clears.
+	u.Write8(1, ierTHRI)
+	if !irq {
+		t.Fatal("no THRE interrupt after enabling it")
+	}
+	if v, _ := u.Read(2, 1); v&0x0f != 0x02 {
+		t.Fatalf("IIR = %#x, want THRE", v)
+	}
+	if irq {
+		t.Fatal("THRE interrupt not cleared by reading IIR")
+	}
+	u.Write8(0, 'x')
+	if !irq || string(u.Output()) != "x" {
+		t.Fatal("transmit did not produce output and a THRE interrupt")
+	}
+}
+
+func TestDiskDirtyTracking(t *testing.T) {
+	d := NewDisk(1 << 20)
+	d.FormatExt2("test")
+	idx, data := d.TakeDirty()
+	if len(idx) == 0 || len(idx) != len(data) {
+		t.Fatalf("format left %d dirty blocks", len(idx))
+	}
+	if sb := data[0][1024+56:]; sb[0] != 0x53 || sb[1] != 0xef {
+		t.Fatal("no ext2 magic in superblock")
+	}
+	if idx, _ := d.TakeDirty(); len(idx) != 0 {
+		t.Fatal("dirty set not cleared")
+	}
+	d.WriteAt([]byte("hello"), BlockSize*7+4094)
+	idx, _ = d.TakeDirty()
+	if len(idx) != 2 || idx[0] != 7 || idx[1] != 8 {
+		t.Fatalf("dirty blocks = %v, want [7 8]", idx)
+	}
+	buf := make([]byte, 5)
+	d.ReadAt(buf, BlockSize*7+4094)
+	if string(buf) != "hello" {
+		t.Fatalf("read back %q", buf)
+	}
+}

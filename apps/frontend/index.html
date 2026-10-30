@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="description" content="A real RISC-V Linux kernel booting entirely in your browser, on an emulator written in Go and compiled to WebAssembly." />
+    <meta name="theme-color" content="#0d1117" />
+    <title>bootlet</title>
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3' fill='%230d1117'/><path d='M4 5l3 3-3 3' stroke='%233fb950' stroke-width='1.6' fill='none'/><path d='M8.5 11h4' stroke='%23e6edf3' stroke-width='1.6'/></svg>" />
+  </head>
+  <body>
+    <header class="bar">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">&gt;_</span>
+        <span class="name">bootlet</span>
+        <span class="tagline">RISC-V Linux, running in your browser</span>
+      </div>
+      <div class="controls">
+        <span class="status" id="status" role="status" aria-live="polite">
+          <span class="dot"></span><span id="status-text">Starting…</span>
+        </span>
+        <button id="toggle" type="button" disabled>Stop</button>
+        <button id="restart" type="button" disabled>Restart</button>
+      </div>
+    </header>
+    <main id="terminal" aria-label="Serial console"></main>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

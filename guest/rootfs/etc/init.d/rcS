@@ -1,0 +1,18 @@
+#!/bin/sh
+hostname -F /etc/hostname
+mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
+cat /etc/motd
+
+# Optional persistent disk: the emulator formats it as ext2 and the browser
+# saves it to OPFS/IndexedDB. Mount it in the background so the shell is not
+# delayed by loading the drivers.
+if [ -e /proc/device-tree/soc/virtio_mmio@10001000 ]; then
+  echo "  /data is persistent: files there survive reloads (stored in this browser)."
+  echo
+  (
+    for m in $(cat /lib/modules/load.list); do insmod "/lib/modules/$m"; done
+    i=0
+    while [ ! -b /dev/vda ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+    mount -t ext2 -o sync,noatime /dev/vda /data
+  ) >/dev/null 2>&1 &
+fi

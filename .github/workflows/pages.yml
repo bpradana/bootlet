@@ -1,0 +1,54 @@
+name: Build, test and deploy
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: jdx/mise-action@v3
+
+      - name: Cache guest packages and riscv-tests
+        uses: actions/cache@v4
+        with:
+          path: |
+            guest/.cache
+            third_party
+          key: guest-${{ hashFiles('guest/manifest.toml', 'scripts/build-riscv-tests.sh') }}
+
+      - name: Install Playwright system dependencies
+        run: pnpm install && pnpm --dir apps/frontend exec playwright install --with-deps chromium
+
+      # lint, Go unit tests + riscv-tests, native boot test, production build,
+      # and the Playwright browser boot test.
+      - run: mise run test
+
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

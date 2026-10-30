@@ -1,0 +1,4 @@
+
+  Welcome to bootlet: Linux on an RV64GC emulator, running in your browser.
+  Everything here is BusyBox; try `uname -a`, `ls /`, `cat /proc/cpuinfo`.
+
