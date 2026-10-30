@@ -1,0 +1,3 @@
+NAME="bootlet"
+ID=bootlet
+PRETTY_NAME="bootlet (Alpine linux-lts kernel + BusyBox)"

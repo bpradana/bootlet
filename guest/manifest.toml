@@ -1,0 +1,26 @@
+# Pinned Alpine Linux riscv64 packages that make up the guest. Nothing here is compiled:
+# guestpack downloads these, verifies them, and packs a kernel Image + initramfs.
+mirror = "https://dl-cdn.alpinelinux.org/alpine/v3.24"
+
+[kernel]
+package = "main/linux-lts-6.18.59-r0.apk"
+sha256 = "c3556340be3a6ed9041dd3574a4a6255ffad3a81e1cbc15e73409d621cb8c55e"
+image = "boot/vmlinuz-lts"
+# Options the emulator depends on. guestpack fails if any is not built in (=y).
+required = [
+  "SERIAL_8250", "SERIAL_8250_CONSOLE", "SERIAL_OF_PLATFORM", "SERIAL_EARLYCON_RISCV_SBI",
+  "SIFIVE_PLIC", "RISCV_TIMER", "RISCV_SBI_V01", "FPU",
+  "BLK_DEV_INITRD", "DEVTMPFS", "TMPFS", "BINFMT_ELF",
+]
+# Loadable modules copied into the initramfs (paths below lib/modules/<version>/),
+# with their dependencies. Used for the optional persistent disk at /data.
+modules = [
+  "kernel/drivers/virtio/virtio_mmio.ko.gz",
+  "kernel/drivers/block/virtio_blk.ko.gz",
+  "kernel/fs/ext4/ext4.ko.gz",
+]
+
+[busybox]
+package = "main/busybox-static-1.37.0-r31.apk"
+sha256 = "300ecf7530b06c0dfaf56e8b7ed2bba9ccebac58984914518d77cc1a39a21413"
+binary = "bin/busybox.static"

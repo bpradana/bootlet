@@ -1,0 +1,13 @@
+node_modules/
+dist/
+guest/.cache/
+guest/out/
+third_party/
+apps/frontend/public/bootlet.wasm
+apps/frontend/src/vendor/
+apps/frontend/public/guest/
+apps/frontend/test-results/
+apps/frontend/playwright-report/
+.DS_Store
+guest/disk.img
+.idea/

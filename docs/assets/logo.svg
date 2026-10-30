@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 96 96" width="96" height="96" role="img" aria-label="bootlet">
+  <g stroke="#3fb950" stroke-opacity=".55" stroke-width="4" stroke-linecap="round">
+    <path d="M30 6v8M48 6v8M66 6v8M30 82v8M48 82v8M66 82v8M2 34h8M2 62h8M86 34h8M86 62h8"/>
+  </g>
+  <rect x="12" y="16" width="72" height="64" rx="12" fill="#0d1117"/>
+  <rect x="12" y="16" width="72" height="64" rx="12" fill="none" stroke="#3fb950" stroke-opacity=".4" stroke-width="2"/>
+  <path d="M28 38l11 10-11 10" fill="none" stroke="#3fb950" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M46 60h22" fill="none" stroke="#e6edf3" stroke-width="6" stroke-linecap="round"/>
+</svg>

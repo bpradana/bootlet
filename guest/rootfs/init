@@ -1,0 +1,8 @@
+#!/bin/sh
+# PID 1 starts here: mount the pseudo filesystems, then hand over to busybox init.
+mount -t devtmpfs devtmpfs /dev
+mount -t proc proc /proc
+mount -t sysfs sysfs /sys
+mount -t tmpfs tmpfs /tmp
+mount -t tmpfs tmpfs /run
+exec /sbin/init

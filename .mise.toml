@@ -1,0 +1,90 @@
+# Bootlet monorepo toolchain + tasks. Run `mise install` then `mise tasks` to list everything.
+[tools]
+go = "1.27.3"
+node = "24"
+pnpm = "10"
+zig = "0.15.2" # only used to cross-assemble riscv-tests
+
+[env]
+GUEST_OUT = "{{config_root}}/guest/out"
+
+[tasks.setup]
+description = "Install JS dependencies"
+run = "pnpm install"
+
+[tasks."guest:fetch"]
+description = "Download pinned Alpine riscv64 packages and pack kernel + initramfs into guest/out"
+run = "go run ./guest/tools/cmd/guestpack -manifest guest/manifest.toml -rootfs guest/rootfs -cache guest/.cache -out guest/out"
+sources = ["guest/manifest.toml", "guest/rootfs/**/*", "guest/tools/**/*.go"]
+outputs = ["guest/out/Image", "guest/out/initrd.cpio"]
+
+[tasks."emu:test"]
+description = "Go unit tests, including the official riscv-tests suites"
+depends = ["emu:riscv-tests"]
+run = ["go test ./packages/emulator/... ./guest/tools/..."]
+
+[tasks."emu:riscv-tests"]
+description = "Clone and build the official riscv-tests ELFs with zig cc"
+run = "bash scripts/build-riscv-tests.sh"
+sources = ["scripts/build-riscv-tests.sh"]
+outputs = ["third_party/riscv-tests-build/rv64ui/add"]
+
+[tasks."emu:run"]
+description = "Boot the guest natively in this terminal (Ctrl-A x to quit); /data persists in guest/disk.img"
+depends = ["guest:fetch"]
+dir = "packages/emulator"
+run = "go run ./cmd/bootlet -kernel $GUEST_OUT/Image -initrd $GUEST_OUT/initrd.cpio -disk ../../guest/disk.img"
+
+[tasks."emu:boot-test"]
+description = "Boot the guest natively and run shell commands against it"
+depends = ["guest:fetch"]
+dir = "packages/emulator"
+run = "go test -tags boot -run TestBoot -v -timeout 10m ./machine"
+
+[tasks."wasm:build"]
+description = "Compile the emulator to WebAssembly for the frontend"
+dir = "packages/emulator"
+env = { GOOS = "js", GOARCH = "wasm" }
+run = [
+  "mkdir -p ../../apps/frontend/public ../../apps/frontend/src/vendor",
+  "go build -trimpath -ldflags='-s -w' -o ../../apps/frontend/public/bootlet.wasm ./cmd/wasm",
+  "cp \"$(go env GOROOT)/lib/wasm/wasm_exec.js\" ../../apps/frontend/src/vendor/wasm_exec.js",
+]
+sources = ["**/*.go", "go.mod"]
+outputs = ["../../apps/frontend/public/bootlet.wasm"]
+
+[tasks."web:assets"]
+description = "Copy compressed guest images into the frontend"
+depends = ["guest:fetch"]
+run = "mkdir -p apps/frontend/public/guest && cp guest/out/Image.gz guest/out/initrd.cpio.gz apps/frontend/public/guest/"
+
+[tasks."web:dev"]
+description = "Start the frontend dev server"
+depends = ["setup", "wasm:build", "web:assets"]
+dir = "apps/frontend"
+run = "pnpm dev"
+
+[tasks.build]
+description = "Production static build into dist/"
+depends = ["setup", "wasm:build", "web:assets"]
+run = ["pnpm --filter frontend build", "rm -rf dist && cp -R apps/frontend/dist dist"]
+
+[tasks."web:e2e"]
+description = "Playwright end-to-end boot test against the production build"
+depends = ["build"]
+dir = "apps/frontend"
+run = ["pnpm exec playwright install chromium", "pnpm exec playwright test"]
+
+[tasks.lint]
+description = "gofmt + go vet + TypeScript typecheck"
+depends = ["setup"]
+run = [
+  "test -z \"$(gofmt -l packages guest)\" || (gofmt -l packages guest && exit 1)",
+  "go vet ./packages/emulator/... ./guest/tools/... && go vet -tags boot ./packages/emulator/machine",
+  "cd packages/emulator && GOOS=js GOARCH=wasm go vet ./cmd/wasm",
+  "pnpm -r typecheck",
+]
+
+[tasks.test]
+description = "Everything CI runs"
+depends = ["lint", "emu:test", "emu:boot-test", "web:e2e"]
