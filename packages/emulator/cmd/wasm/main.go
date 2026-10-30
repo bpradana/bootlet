@@ -117,7 +117,7 @@ func attachDisk(_ js.Value, args []js.Value) any {
 	disk = devices.NewDisk(uint64(args[0].Int()) << 20)
 	n := args[1].Get("length").Int()
 	if n == 0 {
-		disk.FormatExt2("bootlet")
+		disk.Format("bootlet")
 	} else {
 		idx := bytesFrom(js.Global().Get("Uint8Array").New(args[1].Get("buffer"), args[1].Get("byteOffset"), n*4))
 		data := bytesFrom(args[2])
@@ -157,7 +157,7 @@ func takeDirty(js.Value, []js.Value) any {
 // Call reset() afterwards.
 func resetDisk(_ js.Value, args []js.Value) any {
 	disk = devices.NewDisk(uint64(args[0].Int()) << 20)
-	disk.FormatExt2("bootlet")
+	disk.Format("bootlet")
 	m.ReplaceDisk(disk)
 	return nil
 }

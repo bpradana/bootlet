@@ -168,7 +168,7 @@ discovers it must fall back to Sv39.
 ```
 packages/emulator/       Go module: the machine, with no frontend dependencies
   cpu/                   hart: decode/execute, CSRs, traps, FPU, RVC table, Sv39 MMU + TLB
-  devices/               UART, PLIC, CLINT, RTC, virtio-mmio transport, virtio-blk/-net, sparse disk + ext2 mkfs
+  devices/               UART, PLIC, CLINT, RTC, virtio-mmio transport, virtio-blk/-net, sparse disk + journaled mkfs
   netstack/              user-mode network: ARP, ICMP, fake DNS, TCP termination; direct and Wisp upstreams
   fdt/                   device tree blob encoder
   boot/                  RISC-V Image and ELF loaders
@@ -274,16 +274,29 @@ The native runner doesn't need a relay: `-net` uses the host's own sockets, and
 The root filesystem survives page reloads:
 
 - The disk is a 1 GiB **sparse** virtio block device: only written blocks take memory
-  or storage, so a fresh system costs about 200 KB. In OPFS, blocks are stored back to
-  back with an index, so storage use matches what was written, not the disk size. BusyBox has no `mkfs.ext2`, so
-  the emulator formats a new disk as ext2 itself.
-- `/init` mounts it (`-o sync`) as the upper layer of an **overlay** on top of the
+  or storage, so a fresh system costs about 200 KB. BusyBox has no `mkfs`, so the
+  emulator formats a new disk itself, with an 8 MiB **journal** (ext3 layout, mounted
+  by the ext4 driver).
+- `/init` mounts it (`commit=1`) as the upper layer of an **overlay** on top of the
   initramfs. Everything you write, from `apk add` to `/root` and `/etc`, lands on the
   disk. `/tmp` and `/run` are tmpfs.
 - Every 2 seconds, and when the machine stops, the worker collects the 4 KiB blocks
   written since the last save. It stores them in the **Origin Private File System**, or
-  in **IndexedDB** where OPFS sync handles aren't available.
+  in **IndexedDB** where OPFS sync handles aren't available. In OPFS, blocks are stored
+  back to back with an index, so storage use matches what was written, not the disk size.
 - **Reset disk** wipes the saved blocks and reboots into the stock system.
+
+**Reloading or closing the tab is a power cut.** Whatever the guest wrote after the last
+save is lost, so the saved disk is the device as it was at that moment. Two things make
+that safe:
+- **Each save is atomic.** IndexedDB saves run in one transaction. OPFS saves go through a
+  write-ahead log, so a tab closed mid-save keeps the whole batch or none of it.
+- **The kernel replays the journal** on the next mount, like after a crash on real
+  hardware.
+
+At worst, the last couple of seconds of changes are gone; the filesystem itself stays
+consistent. `TestCrashConsistency` checks this by "reloading" a guest in the middle of
+heavy file churn.
 
 Hover the status indicator to see which backend is in use. The native runner keeps the
 same disk format in a sparse file (`-disk guest/disk.img`).
@@ -298,7 +311,7 @@ m := machine.New(machine.Config{RAMSize: 128 << 20}) // Cmdline defaults to mach
 m.LoadKernel(image)                                   // raw RISC-V Linux Image
 m.LoadInitrd(cpio)
 disk := devices.NewDisk(1 << 30)                      // optional: virtio-blk at /dev/vda,
-disk.FormatExt2("bootlet")                            // the guest's persistent root
+disk.Format("bootlet")                            // the guest's persistent root
 m.AttachDisk(disk)
 m.AttachNet(netstack.New(netstack.NewDirectUpstream())) // optional: virtio-net
 m.Reset()                                             // (re)boot
@@ -384,7 +397,7 @@ default relay.
 | Boot natively in the terminal, with networking | `mise run emu:run` |
 | Fetch and pack the guest | `mise run guest:fetch` |
 | Go unit tests (CPU + riscv-tests, devices, netstack, Wisp, relay, guest tools) | `mise run emu:test` |
-| Native boot test (shell, HTTP through the stack, persistence across reboot) | `mise run emu:boot-test` (`BOOTLET_ONLINE=1` adds a real `apk add`) |
+| Native boot and crash tests (shell, HTTP through the stack, persistence across reboot, consistency after a simulated tab close) | `mise run emu:boot-test` (`BOOTLET_ONLINE=1` adds a real `apk add`) |
 | Browser end-to-end tests (Playwright; boot, Reset disk, relay networking) | `mise run web:e2e` |
 | gofmt, vet, TypeScript typecheck | `mise run lint` |
 | Everything CI runs | `mise run test` |
@@ -407,6 +420,7 @@ go run ./cmd/bootlet -kernel ../../guest/out/Image -initrd ../../guest/out/initr
 | The toolbar says **Offline** | The relay is unreachable or refused the page's origin (check its `-origins`). The page reconnects with backoff; open connections in the guest are reset. |
 | `wget https://…` fails | BusyBox `wget`'s built-in TLS can't talk to many modern servers. Use `apk add curl` and `curl`. Plain HTTP `wget` works. |
 | A connection is refused immediately | The relay blocks that port or address. Private and loopback destinations need `-allow-private` (local testing only). |
+| `EXT4-fs error … deleted inode referenced` or `Data consistency error` | A corrupted disk. Disks from versions before the journal was added could corrupt on reload; they're deleted automatically on upgrade. If it ever happens again, use **Reset disk** (and please report it). |
 | The system misbehaves after a site update | The saved overlay still holds files from the previous version (for example apk's database). Use **Reset disk**. |
 | Status tooltip says changes are not saved | The browser blocks storage (for example, some private windows), or another tab holds the OPFS disk. Close the other tab and reload. |
 | `guestpack: sha256 mismatch` | The mirror's file differs from the pinned one. Alpine replaced the package: update `guest/manifest.toml` to the new version and hash. |
@@ -426,9 +440,8 @@ go run ./cmd/bootlet -kernel ../../guest/out/Image -initrd ../../guest/out/initr
 - **Disk size vs. memory.** The disk is 1 GiB, but every block written is also held in
   the page's memory, and downloads have no backpressure from the relay. In practice a
   few hundred MB of installed software is the comfortable limit for a browser tab.
-- **ext2 without fsck.** Closing the tab in the middle of a write can leave the disk
-  inconsistent, and BusyBox has no `e2fsck`. Writes are synchronous and saved every 2 s,
-  and Reset disk is the way out.
+- **Recent writes can be lost.** Closing the tab loses up to about 3 s of changes (the
+  journal commit interval plus the save interval). The filesystem stays consistent.
 - **Guest clock pauses aren't hidden.** After Stop and Start, the guest sees the
   wall-clock time that passed.
 

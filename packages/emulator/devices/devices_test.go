@@ -70,7 +70,7 @@ func TestUARTInterrupts(t *testing.T) {
 
 func TestDiskDirtyTracking(t *testing.T) {
 	d := NewDisk(1 << 20)
-	d.FormatExt2("test")
+	d.Format("test")
 	idx, data := d.TakeDirty()
 	if len(idx) == 0 || len(idx) != len(data) {
 		t.Fatalf("format left %d dirty blocks", len(idx))
@@ -93,9 +93,9 @@ func TestDiskDirtyTracking(t *testing.T) {
 	}
 }
 
-func TestFormatExt2MultiGroup(t *testing.T) {
+func TestFormatMultiGroup(t *testing.T) {
 	d := NewDisk(1 << 30)
-	d.FormatExt2("big")
+	d.Format("big")
 	sb := make([]byte, 1024)
 	d.ReadAt(sb, 1024)
 	le := func(off int) uint32 {

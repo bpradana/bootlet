@@ -44,7 +44,7 @@ func TestBoot(t *testing.T) {
 	webPort := web.Listener.Addr().(*net.TCPAddr).Port
 
 	disk := devices.NewDisk(256 << 20)
-	disk.FormatExt2("test")
+	disk.Format("test")
 	m := machine.New(machine.Config{})
 	if err := m.LoadKernel(kernel); err != nil {
 		t.Fatal(err)

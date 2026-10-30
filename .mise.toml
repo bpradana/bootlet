@@ -47,7 +47,7 @@ run = "docker build -f apps/relay/Dockerfile -t bootlet-relay ."
 description = "Boot the guest natively and run shell commands against it"
 depends = ["guest:fetch"]
 dir = "packages/emulator"
-run = "go test -tags boot -run TestBoot -v -timeout 10m ./machine"
+run = "go test -tags boot -run 'TestBoot|TestCrashConsistency' -v -timeout 15m ./machine"
 
 [tasks."wasm:build"]
 description = "Compile the emulator to WebAssembly for the frontend"
