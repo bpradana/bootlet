@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"github.com/coder/websocket"
@@ -118,5 +119,26 @@ func TestPublic(t *testing.T) {
 		if got := public(netip.MustParseAddr(addr)); got != want {
 			t.Errorf("public(%s) = %v, want %v", addr, got, want)
 		}
+	}
+}
+
+func TestSiteHandler(t *testing.T) {
+	get := func(site fstest.MapFS, path string) string {
+		rec := httptest.NewRecorder()
+		siteHandler(site).ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		return rec.Body.String()
+	}
+	// Built without the website (only the placeholder README): explain.
+	bare := fstest.MapFS{"README.md": {Data: []byte("placeholder")}}
+	if got := get(bare, "/"); !strings.Contains(got, "built without the website") {
+		t.Fatalf("bare relay served %q", got)
+	}
+	// With the website: serve it, and tell the page to use this origin.
+	site := fstest.MapFS{"index.html": {Data: []byte("<title>bootlet</title>")}}
+	if got := get(site, "/"); !strings.Contains(got, "<title>bootlet</title>") {
+		t.Fatalf("index served %q", got)
+	}
+	if got := get(site, "/relay.json"); !strings.Contains(got, `"same-origin"`) {
+		t.Fatalf("relay.json served %q", got)
 	}
 }

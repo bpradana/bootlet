@@ -14,6 +14,7 @@ export type ToWorker =
   | { type: "stop" } // pause execution
   | { type: "restart" } // reboot from the original images
   | { type: "resetDisk" } // wipe the persistent disk and reboot
+  | { type: "relay"; url: string } // connect to another relay ("" disconnects)
   | { type: "input"; data: Uint8Array };
 
 /** Messages sent from the worker to the UI. */

@@ -36,8 +36,31 @@ dir = "packages/emulator"
 run = "go run ./cmd/bootlet -kernel $GUEST_OUT/Image -initrd $GUEST_OUT/initrd.cpio -disk ../../guest/disk.img -net"
 
 [tasks."relay:dev"]
-description = "Run the Wisp network relay locally (open the page with ?relay=ws://localhost:8089/)"
-run = "go run ./apps/relay -addr :8089 -allow-private"
+description = "Run the network relay locally for development (the dev page connects from its network menu)"
+run = "go run ./apps/relay -allow-private"
+
+[tasks."relay:build"]
+description = "Build the relay with the website embedded (serves bootlet at http://localhost:8089)"
+depends = ["build"]
+run = [
+  "find apps/relay/site -mindepth 1 ! -name README.md -delete && cp -R dist/. apps/relay/site/",
+  "mkdir -p dist-relay && CGO_ENABLED=0 go build -C apps/relay -trimpath -ldflags='-s -w' -o ../../dist-relay/bootlet-relay .",
+]
+
+[tasks."relay:dist"]
+description = "Cross-compile the relay (with the website) for macOS, Linux and Windows into dist-relay/"
+depends = ["build"]
+run = """
+set -e
+find apps/relay/site -mindepth 1 ! -name README.md -delete && cp -R dist/. apps/relay/site/
+mkdir -p dist-relay
+for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64; do
+  os=${target%/*}; arch=${target#*/}; ext=""; [ "$os" = windows ] && ext=.exe
+  CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -C apps/relay -trimpath -ldflags='-s -w' \
+    -o ../../dist-relay/bootlet-relay-$os-$arch$ext .
+done
+ls -la dist-relay
+"""
 
 [tasks."relay:docker"]
 description = "Build the relay container image"

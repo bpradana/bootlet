@@ -26,6 +26,7 @@ interface BootletAPI {
   attachNet(): void;
   netInput(packet: Uint8Array): void;
   netOutput(): Uint8Array<ArrayBuffer>[];
+  netConnecting(): void;
   netDisconnected(): void;
 }
 

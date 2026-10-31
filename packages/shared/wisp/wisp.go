@@ -219,6 +219,10 @@ func (c *Client) flush(id uint32) {
 	}
 }
 
+// Ready reports whether the server's initial CONTINUE has arrived, i.e. the
+// connection is up.
+func (c *Client) Ready() bool { return c.ready }
+
 // Outgoing returns and clears the packets waiting to be sent to the server.
 func (c *Client) Outgoing() [][]byte {
 	out := c.out

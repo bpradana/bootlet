@@ -11,14 +11,56 @@ const restartBtn = document.getElementById("restart") as HTMLButtonElement;
 const resetDiskBtn = document.getElementById("reset-disk") as HTMLButtonElement;
 const netEl = document.getElementById("net")!;
 
-// ?relay=wss://host/ (or VITE_RELAY_URL at build time) enables networking
-// through a Wisp relay; ?relay= with no value turns it off. ?mem=256 sets RAM,
-// and ?quiet hides the kernel's boot log.
+// ?mem=256 sets the guest RAM in MiB and ?quiet hides the kernel's boot log.
 const params = new URLSearchParams(location.search);
-const relay = params.get("relay") ?? import.meta.env.VITE_RELAY_URL ?? "";
 const memMiB = Number(params.get("mem")) || 0;
 const quiet = params.has("quiet");
-const startMsg: ToWorker = { type: "start", base: document.baseURI, relay, memMiB, quiet };
+
+// The network relay normally runs on the user's own computer (apps/relay).
+const LOCAL_RELAY = "ws://127.0.0.1:8089/";
+const RELAY_KEY = "bootlet.relay";
+const RELEASES = "https://github.com/bpradana/bootlet/releases/latest/download/bootlet-relay-";
+let relay = "";
+let servedByRelay = false;
+
+const remembered = {
+  get: () => {
+    try {
+      return localStorage.getItem(RELAY_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  },
+  set: (url: string) => {
+    try {
+      if (url) localStorage.setItem(RELAY_KEY, url);
+      else localStorage.removeItem(RELAY_KEY);
+    } catch {
+      // storage unavailable: the choice just isn't remembered
+    }
+  },
+};
+
+// resolveRelay picks the relay to start with, in order: ?relay= (empty for
+// none); the relay that served this page (it answers relay.json); a
+// build-time default; the last relay the user connected to. Otherwise there
+// is none until the user connects from the network dialog: auto-connecting
+// to localhost from a public site would greet every visitor with a browser
+// permission prompt.
+async function resolveRelay(): Promise<string> {
+  const param = params.get("relay");
+  if (param !== null) return param;
+  try {
+    const res = await fetch("./relay.json", { cache: "no-store" });
+    if (res.ok && (await res.json()).relay === "same-origin") {
+      servedByRelay = true;
+      return `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/`;
+    }
+  } catch {
+    // not served by a relay
+  }
+  return import.meta.env.VITE_RELAY_URL || remembered.get();
+}
 
 const term = new Terminal({
   fontFamily: 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
@@ -119,12 +161,12 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       render();
       break;
     case "net":
+      netState = msg.state;
       netEl.dataset.state = msg.state;
       netEl.textContent = netLabels[msg.state];
-      netEl.title =
-        msg.state === "off"
-          ? "No network relay configured. Open the page with ?relay=wss://<relay>/ to enable networking."
-          : `Wisp relay: ${relay}`;
+      netEl.title = msg.state === "off" ? "Set up networking" : `Relay: ${relay}`;
+      if (msg.state === "online" && !servedByRelay) remembered.set(relay);
+      renderNetDialog();
       break;
     case "stats":
       mips = msg.mips;
@@ -149,7 +191,7 @@ toggleBtn.onclick = () => {
   if (state === "halted") {
     restart();
   } else if (state === "stopped") {
-    send(startMsg);
+    send(startMessage());
   } else {
     send({ type: "stop" });
   }
@@ -173,6 +215,64 @@ resetDiskBtn.onclick = () => {
   term.focus();
 };
 
+// Network dialog.
+const netDialog = document.getElementById("net-dialog") as HTMLDialogElement;
+const netStatus = document.getElementById("net-status")!;
+const netSetup = document.getElementById("net-setup")!;
+const netURL = document.getElementById("net-url") as HTMLInputElement;
+const netConnect = document.getElementById("net-connect") as HTMLButtonElement;
+const netDisconnect = document.getElementById("net-disconnect") as HTMLButtonElement;
+let netState: NetState = "off";
+
+const downloads: [string, string][] = [
+  ["macOS (Apple silicon)", "darwin-arm64"],
+  ["macOS (Intel)", "darwin-amd64"],
+  ["Linux (x86-64)", "linux-amd64"],
+  ["Linux (ARM64)", "linux-arm64"],
+  ["Windows", "windows-amd64.exe"],
+];
+document.getElementById("net-downloads")!.append(
+  ...downloads.flatMap(([label, file], i) => {
+    const a = Object.assign(document.createElement("a"), { href: RELEASES + file, textContent: label });
+    return i === 0 ? [a] : [document.createTextNode(" · "), a];
+  }),
+);
+
+function renderNetDialog() {
+  const statusText: Record<NetState, string> = {
+    off: "Not connected. The guest is offline.",
+    connecting: `Connecting to ${relay}…`,
+    online: servedByRelay ? "Online through the relay that serves this page." : `Online through ${relay}.`,
+    offline: `Can't reach ${relay}. Is the relay running? Retrying automatically.`,
+  };
+  netStatus.textContent = statusText[netState];
+  netSetup.hidden = netState === "online";
+  netDisconnect.disabled = netState === "off";
+}
+
+netEl.onclick = () => {
+  netURL.value = relay || LOCAL_RELAY;
+  renderNetDialog();
+  netDialog.showModal();
+};
+netConnect.onclick = () => {
+  relay = netURL.value.trim();
+  send({ type: "relay", url: relay });
+};
+netDisconnect.onclick = () => {
+  relay = "";
+  remembered.set("");
+  send({ type: "relay", url: "" });
+};
+netDialog.addEventListener("close", () => term.focus());
+
+function startMessage(): ToWorker {
+  return { type: "start", base: document.baseURI, relay, memMiB, quiet };
+}
+
 render();
-send(startMsg);
+void resolveRelay().then((url) => {
+  relay = url;
+  send(startMessage());
+});
 term.focus();

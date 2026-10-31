@@ -64,6 +64,7 @@ func main() {
 	switch {
 	case *relayURL != "":
 		up := netstack.NewWispUpstream()
+		up.Connecting()
 		link, err := dialRelay(*relayURL, up)
 		if err != nil {
 			log.Fatalf("relay: %v", err)

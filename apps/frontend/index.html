@@ -19,13 +19,44 @@
         <span class="status" id="status" role="status" aria-live="polite">
           <span class="dot"></span><span id="status-text">Starting…</span>
         </span>
-        <span class="net" id="net" data-state="off">Network off</span>
+        <button class="net" id="net" type="button" data-state="off" aria-haspopup="dialog">Network off</button>
         <button id="toggle" type="button" disabled>Stop</button>
         <button id="restart" type="button" disabled>Restart</button>
         <button id="reset-disk" type="button" disabled>Reset disk</button>
       </div>
     </header>
     <main id="terminal" aria-label="Serial console"></main>
+    <dialog id="net-dialog" aria-labelledby="net-title">
+      <form method="dialog">
+        <h2 id="net-title">Network</h2>
+        <p class="net-status" id="net-status"></p>
+        <div id="net-setup">
+          <p>
+            bootlet runs entirely in your browser, and browsers can't open network connections on their own. A small
+            relay program on your computer opens them for the guest, so <code>apk add</code>, <code>curl</code> and
+            <code>git</code> work.
+          </p>
+          <ol>
+            <li>Download the relay: <span id="net-downloads"></span></li>
+            <li>
+              Run it. macOS and Linux: <code>chmod +x bootlet-relay-*</code>, then <code>./bootlet-relay-*</code>.
+              Windows: double-click it.
+            </li>
+            <li>
+              Open <a href="http://localhost:8089/" target="_blank" rel="noopener">http://localhost:8089</a>, which works
+              in every browser. Or connect this page below: Chrome and Edge ask once to allow access to this device;
+              Safari doesn't allow it.
+            </li>
+          </ol>
+        </div>
+        <label class="net-url">Relay <input id="net-url" type="text" spellcheck="false" value="ws://127.0.0.1:8089/" /></label>
+        <div class="net-actions">
+          <button id="net-connect" type="button">Connect</button>
+          <button id="net-disconnect" type="button">Disconnect</button>
+          <button value="close">Close</button>
+        </div>
+      </form>
+    </dialog>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

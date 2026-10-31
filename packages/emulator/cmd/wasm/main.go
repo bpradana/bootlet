@@ -34,6 +34,7 @@ func main() {
 	api.Set("attachNet", js.FuncOf(attachNet))
 	api.Set("netInput", js.FuncOf(netInput))
 	api.Set("netOutput", js.FuncOf(netOutput))
+	api.Set("netConnecting", js.FuncOf(netConnecting))
 	api.Set("netDisconnected", js.FuncOf(netDisconnected))
 	js.Global().Set("bootlet", api)
 	select {}
@@ -186,6 +187,13 @@ func netOutput(js.Value, []js.Value) any {
 		arr.SetIndex(i, u)
 	}
 	return arr
+}
+
+// netConnecting() must be called when a WebSocket to the relay is opened:
+// until then the guest's connections fail immediately.
+func netConnecting(js.Value, []js.Value) any {
+	wisp.Connecting()
+	return nil
 }
 
 // netDisconnected() must be called when the relay WebSocket closes: open
