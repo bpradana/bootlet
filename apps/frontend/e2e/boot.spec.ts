@@ -60,3 +60,22 @@ test("the guest reaches the network through a Wisp relay", async ({ page }) => {
   await page.keyboard.type("wget -qO- http://10.0.2.2:4174/bootlet/ | grep -o '<title>[a-z]*</title>'\n");
   await expect(screen).toContainText("<title>bootlet</title>");
 });
+
+test("networking can be connected from the network dialog", async ({ page }) => {
+  await page.goto("./");
+  const screen = await bootToPrompt(page);
+  await expect(page.locator("#net")).toHaveText("Network off"); // no auto-connect on first visit
+
+  await page.locator("#net").click();
+  await page.locator("#net-url").fill(RELAY);
+  await page.locator("#net-connect").click();
+  await expect(page.locator("#net")).toHaveText("Online");
+  await page.keyboard.press("Escape");
+  await page.locator(".xterm").click();
+  await page.keyboard.type("wget -qO- http://10.0.2.2:4174/bootlet/ | grep -o '<title>[a-z]*</title>'\n");
+  await expect(screen).toContainText("<title>bootlet</title>");
+
+  // The relay is remembered: after a reload the page connects by itself.
+  await page.reload();
+  await expect(page.locator("#net")).toHaveText("Online");
+});

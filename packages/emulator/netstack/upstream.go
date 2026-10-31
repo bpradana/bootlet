@@ -191,17 +191,35 @@ func (u *DirectUpstream) Pending() bool {
 
 // WispUpstream carries streams over a Wisp connection without doing any
 // I/O itself: the host moves packets between Output/Input and a WebSocket.
+// Before the relay's greeting arrives (or after the connection is lost), new
+// streams fail at once, so the guest sees "connection refused" rather than
+// a hang.
 type WispUpstream struct {
-	c      *wisp.Client
-	open   map[uint32]bool
-	events []Event
+	c          *wisp.Client
+	open       map[uint32]bool
+	events     []Event
+	connecting bool
+	failed     uint32
 }
+
+// Connecting must be called when a WebSocket to the relay is being opened:
+// streams opened from now on wait for the relay's greeting instead of
+// failing.
+func (u *WispUpstream) Connecting() { u.connecting = true }
 
 func NewWispUpstream() *WispUpstream {
 	return &WispUpstream{c: wisp.NewClient(), open: map[uint32]bool{}}
 }
 
 func (u *WispUpstream) Open(host string, port uint16) uint32 {
+	if !u.c.Ready() && !u.connecting {
+		// Offline: fail without involving the Wisp client. These ids come
+		// from the top half of the range, which Wisp stream ids never reach.
+		u.failed++
+		id := 1<<31 | u.failed
+		u.events = append(u.events, Event{Kind: EventClosed, ID: id, Failed: true})
+		return id
+	}
 	id := u.c.Connect(host, port)
 	u.open[id] = true
 	return id
@@ -237,6 +255,7 @@ func (u *WispUpstream) Output() [][]byte { return u.c.Outgoing() }
 // Disconnected must be called when the WebSocket is lost: every open stream
 // fails and the client starts over (waiting for the next server hello).
 func (u *WispUpstream) Disconnected() {
+	u.connecting = false
 	for id := range u.open {
 		u.events = append(u.events, Event{Kind: EventClosed, ID: id, Failed: true})
 	}

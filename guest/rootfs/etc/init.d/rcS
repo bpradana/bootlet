@@ -23,9 +23,7 @@ ok "Started login shell on the serial console (ttyS0)."
 
 cat /etc/motd
 if [ -e /sys/class/net/eth0 ]; then
-  echo "  Network is up: try \`apk add python3\` or \`wget -qO- http://example.com\`."
-else
-  echo "  No network: open the page with ?relay=wss://<your relay>/ to enable it."
+  echo "  Network: connect a relay with the network button in the toolbar, then try \`apk add python3\`."
 fi
 if grep -q ' / overlay ' /proc/mounts; then
   echo "  Changes to the filesystem are saved in this browser (toolbar: Reset disk)."

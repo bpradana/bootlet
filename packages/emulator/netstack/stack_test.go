@@ -181,3 +181,17 @@ func TestTCPRefused(t *testing.T) {
 		t.Fatalf("failed connect did not reset: %+v", got)
 	}
 }
+
+func TestWispOffline(t *testing.T) {
+	up := NewWispUpstream()
+	s := New(up)
+	s.Receive(tcpFrame([4]byte{1, 2, 3, 4}, 80, 1, 0, tcpSYN, nil))
+	s.Frames()
+	s.Poll()
+	if got := segments(t, s.Frames()); len(got) != 1 || got[0].flags&tcpRST == 0 {
+		t.Fatalf("connection without a relay should reset at once: %+v", got)
+	}
+	if out := up.Output(); len(out) != 0 {
+		t.Fatalf("offline connection queued %d Wisp packets", len(out))
+	}
+}

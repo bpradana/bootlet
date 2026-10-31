@@ -1,8 +1,9 @@
 // Runs the Go/WASM emulator off the main thread. The emulator executes in
 // short slices; between slices the worker posts console output and handles
 // incoming messages, and while the guest idles (wfi) it sleeps until the next
-// timer event, keystroke or network packet. With a relay configured, the
-// guest's TCP connections travel as Wisp packets over a WebSocket.
+// timer event, keystroke or network packet. The guest always has a network
+// device; while a relay is connected, its TCP connections travel as Wisp
+// packets over a WebSocket, and the relay can change at any time.
 import "./vendor/wasm_exec.js";
 import { assets, type FromWorker, type ToWorker } from "@bootlet/shared";
 import { openStore, type BlockStore } from "./storage";
@@ -18,6 +19,7 @@ let memMiB = 0;
 let quiet = false;
 let ws: WebSocket | undefined;
 let reconnectDelay = 1000;
+let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let booting: Promise<void> | undefined;
 let running = false;
 let idleTimer: ReturnType<typeof setTimeout> | undefined;
@@ -87,12 +89,8 @@ async function boot() {
   } else {
     post({ type: "storage", backend: "none", detail: d.error });
   }
-  if (relayURL) {
-    api.attachNet();
-    connectRelay();
-  } else {
-    post({ type: "net", state: "off" });
-  }
+  api.attachNet();
+  setRelay(relayURL);
   check(api.reset());
   post({ type: "state", state: "booting" });
 }
@@ -109,6 +107,23 @@ async function save() {
   await saving;
 }
 
+// setRelay switches to a relay ("" disconnects).
+function setRelay(url: string) {
+  relayURL = url;
+  clearTimeout(reconnectTimer);
+  reconnectDelay = 1000;
+  const old = ws;
+  ws = undefined;
+  if (old) {
+    old.onclose = null;
+    old.close();
+    api?.netDisconnected();
+    wake();
+  }
+  if (url) connectRelay();
+  else post({ type: "net", state: "off" });
+}
+
 function connectRelay() {
   post({ type: "net", state: "connecting" });
   let socket: WebSocket;
@@ -118,6 +133,7 @@ function connectRelay() {
     post({ type: "net", state: "offline" });
     return;
   }
+  api?.netConnecting(); // guest connections now wait for the relay
   socket.binaryType = "arraybuffer";
   ws = socket;
   socket.onopen = () => {
@@ -135,7 +151,7 @@ function connectRelay() {
     api?.netDisconnected(); // open connections fail; the guest sees resets
     post({ type: "net", state: "offline" });
     wake();
-    setTimeout(connectRelay, reconnectDelay);
+    reconnectTimer = setTimeout(connectRelay, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
   };
 }
@@ -241,6 +257,10 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       check(api.reset());
       post({ type: "state", state: "booting" });
       await start();
+      break;
+    case "relay":
+      if (api) setRelay(msg.url);
+      else relayURL = msg.url;
       break;
     case "input":
       api?.input(msg.data);

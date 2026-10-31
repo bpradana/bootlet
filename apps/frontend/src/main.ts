@@ -11,14 +11,56 @@ const restartBtn = document.getElementById("restart") as HTMLButtonElement;
 const resetDiskBtn = document.getElementById("reset-disk") as HTMLButtonElement;
 const netEl = document.getElementById("net")!;
 
-// ?relay=wss://host/ (or VITE_RELAY_URL at build time) enables networking
-// through a Wisp relay; ?relay= with no value turns it off. ?mem=256 sets RAM,
-// and ?quiet hides the kernel's boot log.
+// ?mem=256 sets the guest RAM in MiB and ?quiet hides the kernel's boot log.
 const params = new URLSearchParams(location.search);
-const relay = params.get("relay") ?? import.meta.env.VITE_RELAY_URL ?? "";
 const memMiB = Number(params.get("mem")) || 0;
 const quiet = params.has("quiet");
-const startMsg: ToWorker = { type: "start", base: document.baseURI, relay, memMiB, quiet };
+
+// The network relay normally runs on the user's own computer (apps/relay).
+const LOCAL_RELAY = "ws://127.0.0.1:8089/";
+const RELAY_KEY = "bootlet.relay";
+const RELEASES = "https://github.com/bpradana/bootlet/releases/latest/download/bootlet-relay-";
+let relay = "";
+let servedByRelay = false;
+
+const remembered = {
+  get: () => {
+    try {
+      return localStorage.getItem(RELAY_KEY) ?? "";
+    } catch {
+      return "";
+    }
+  },
+  set: (url: string) => {
+    try {
+      if (url) localStorage.setItem(RELAY_KEY, url);
+      else localStorage.removeItem(RELAY_KEY);
+    } catch {
+      // storage unavailable: the choice just isn't remembered
+    }
+  },
+};
+
+// resolveRelay picks the relay to start with, in order: ?relay= (empty for
+// none); the relay that served this page (it answers relay.json); a
+// build-time default; the last relay the user connected to. Otherwise there
+// is none until the user connects from the network dialog: auto-connecting
+// to localhost from a public site would greet every visitor with a browser
+// permission prompt.
+async function resolveRelay(): Promise<string> {
+  const param = params.get("relay");
+  if (param !== null) return param;
+  try {
+    const res = await fetch("./relay.json", { cache: "no-store" });
+    if (res.ok && (await res.json()).relay === "same-origin") {
+      servedByRelay = true;
+      return `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}/`;
+    }
+  } catch {
+    // not served by a relay
+  }
+  return import.meta.env.VITE_RELAY_URL || remembered.get();
+}
 
 const term = new Terminal({
   fontFamily: 'ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
@@ -119,12 +161,12 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       render();
       break;
     case "net":
+      netState = msg.state;
       netEl.dataset.state = msg.state;
       netEl.textContent = netLabels[msg.state];
-      netEl.title =
-        msg.state === "off"
-          ? "No network relay configured. Open the page with ?relay=wss://<relay>/ to enable networking."
-          : `Wisp relay: ${relay}`;
+      netEl.title = msg.state === "off" ? "Set up networking" : `Relay: ${relay}`;
+      if (msg.state === "online" && !servedByRelay) remembered.set(relay);
+      renderNetDialog();
       break;
     case "stats":
       mips = msg.mips;
@@ -149,7 +191,7 @@ toggleBtn.onclick = () => {
   if (state === "halted") {
     restart();
   } else if (state === "stopped") {
-    send(startMsg);
+    send(startMessage());
   } else {
     send({ type: "stop" });
   }
@@ -173,6 +215,148 @@ resetDiskBtn.onclick = () => {
   term.focus();
 };
 
+// Network dialog.
+const netDialog = document.getElementById("net-dialog") as HTMLDialogElement;
+const netStatus = document.getElementById("net-status")!;
+const netStatusText = document.getElementById("net-status-text")!;
+const netSetup = document.getElementById("net-setup")!;
+const netOnline = document.getElementById("net-online")!;
+const netURL = document.getElementById("net-url") as HTMLInputElement;
+const netConnect = document.getElementById("net-connect") as HTMLButtonElement;
+const netDisconnect = document.getElementById("net-disconnect") as HTMLButtonElement;
+const netDownload = document.getElementById("net-download") as HTMLAnchorElement;
+const netDownloadLabel = document.getElementById("net-download-label")!;
+const netPlatforms = document.getElementById("net-platforms")!;
+const netRun = document.getElementById("net-run")!;
+const netRunHint = document.getElementById("net-run-hint")!;
+const netCopy = document.getElementById("net-copy") as HTMLButtonElement;
+const netShell = document.getElementById("net-shell")!;
+let netState: NetState = "off";
+
+type Platform = { id: string; label: string; chip: string };
+const platforms: Platform[] = [
+  { id: "darwin-arm64", label: "macOS (Apple silicon)", chip: "macOS · Apple silicon" },
+  { id: "darwin-amd64", label: "macOS (Intel)", chip: "macOS · Intel" },
+  { id: "linux-amd64", label: "Linux (x86-64)", chip: "Linux · x86-64" },
+  { id: "linux-arm64", label: "Linux (ARM64)", chip: "Linux · ARM64" },
+  { id: "windows-amd64", label: "Windows", chip: "Windows" },
+];
+
+function detectPlatform(): string {
+  const ua = navigator.userAgent;
+  const hint = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? "";
+  if (/win/i.test(hint) || /Windows/.test(ua)) return "windows-amd64";
+  if (/mac/i.test(hint) || /Mac OS X|Macintosh/.test(ua)) return "darwin-arm64";
+  return /aarch64|arm64/i.test(ua) ? "linux-arm64" : "linux-amd64";
+}
+
+// The commands to run a downloaded relay, without prompts (that is what Copy
+// copies), and a hint shown under them.
+function runInstructions(id: string): { lines: string[]; hint: string } {
+  const file = `bootlet-relay-${id}${id.startsWith("windows") ? ".exe" : ""}`;
+  if (id.startsWith("windows")) {
+    return {
+      lines: ["cd $HOME\\Downloads", `.\\${file}`],
+      hint: "PowerShell, or double-click the file. If SmartScreen warns, choose More info → Run anyway.",
+    };
+  }
+  if (id.startsWith("darwin")) {
+    return {
+      lines: ["cd ~/Downloads", `chmod +x ${file}`, `xattr -c ${file}`, `./${file}`],
+      hint: "xattr clears the download quarantine, so macOS lets the unsigned binary run.",
+    };
+  }
+  return { lines: ["cd ~/Downloads", `chmod +x ${file}`, `./${file}`], hint: "Keep it running while you use bootlet." };
+}
+
+let platform = detectPlatform();
+function selectPlatform(id: string) {
+  platform = id;
+  const p = platforms.find((x) => x.id === id)!;
+  netDownload.href = RELEASES + id + (id.startsWith("windows") ? ".exe" : "");
+  netDownloadLabel.textContent = `Download for ${p.label}`;
+  for (const chip of netPlatforms.children) chip.setAttribute("aria-checked", String((chip as HTMLElement).dataset.id === id));
+  const { lines, hint } = runInstructions(id);
+  const prompt = id.startsWith("windows") ? "PS> " : "$ ";
+  netShell.textContent = id.startsWith("windows") ? "PowerShell" : "Terminal";
+  netRun.replaceChildren(
+    ...lines.flatMap((line, i) => [
+      Object.assign(document.createElement("span"), { className: "prompt", textContent: prompt }),
+      document.createTextNode(line + (i < lines.length - 1 ? "\n" : "")),
+    ]),
+  );
+  netRunHint.textContent = hint;
+}
+netPlatforms.append(
+  ...platforms.map((p) => {
+    const b = Object.assign(document.createElement("button"), { type: "button", className: "chip", textContent: p.chip });
+    b.dataset.id = p.id;
+    b.setAttribute("role", "radio");
+    b.onclick = () => selectPlatform(p.id);
+    return b;
+  }),
+);
+selectPlatform(platform);
+
+netCopy.onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(runInstructions(platform).lines.join("\n"));
+    netCopy.dataset.copied = "";
+    netCopy.querySelector("span")!.textContent = "Copied";
+    setTimeout(() => {
+      delete netCopy.dataset.copied;
+      netCopy.querySelector("span")!.textContent = "Copy";
+    }, 1500);
+  } catch {
+    // clipboard unavailable (insecure context): the text is still selectable
+  }
+};
+
+function renderNetDialog() {
+  const statusText: Record<NetState, string> = {
+    off: "Not connected. The guest is offline.",
+    connecting: `Connecting to ${relay}…`,
+    online: servedByRelay ? "Online through the relay serving this page" : `Online through ${relay}`,
+    offline: `Can't reach ${relay}. Is the relay running? Retrying…`,
+  };
+  netStatus.dataset.state = netState;
+  netStatusText.textContent = statusText[netState];
+  netSetup.hidden = netState === "online";
+  netOnline.hidden = netState !== "online";
+  netDisconnect.hidden = netState === "off" || servedByRelay;
+  netConnect.disabled = netState === "connecting";
+  netConnect.textContent = netState === "connecting" ? "Connecting…" : "Connect";
+}
+
+netEl.onclick = () => {
+  netURL.value = relay || LOCAL_RELAY;
+  renderNetDialog();
+  netDialog.showModal();
+};
+netConnect.onclick = () => {
+  relay = netURL.value.trim() || LOCAL_RELAY;
+  send({ type: "relay", url: relay });
+};
+netURL.onkeydown = (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    netConnect.click();
+  }
+};
+netDisconnect.onclick = () => {
+  relay = "";
+  remembered.set("");
+  send({ type: "relay", url: "" });
+};
+netDialog.addEventListener("close", () => term.focus());
+
+function startMessage(): ToWorker {
+  return { type: "start", base: document.baseURI, relay, memMiB, quiet };
+}
+
 render();
-send(startMsg);
+void resolveRelay().then((url) => {
+  relay = url;
+  send(startMessage());
+});
 term.focus();

@@ -11,3 +11,6 @@ apps/frontend/playwright-report/
 .DS_Store
 guest/disk.img
 .idea/
+dist-relay/
+apps/relay/site/*
+!apps/relay/site/README.md
