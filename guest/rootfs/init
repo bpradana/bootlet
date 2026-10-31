@@ -1,7 +1,8 @@
 #!/bin/sh
-# PID 1 starts here. With a persistent disk attached, the root filesystem
-# becomes an overlay: the initramfs is the read-only lower layer and the
-# disk holds every change, so installed packages and edits survive reboots.
+# PID 1 starts here (the "initrd" stage). With a persistent disk attached,
+# the root filesystem becomes an overlay: the initramfs is the read-only
+# lower layer and the disk holds every change, so installed packages and
+# edits survive reboots.
 . /lib/bootlet-status.sh
 
 mount -t devtmpfs devtmpfs /dev
@@ -10,29 +11,44 @@ mount -t sysfs sysfs /sys
 # From here on only kernel errors reach the console, so kernel chatter does
 # not interleave with the status lines below (everything is still in dmesg).
 echo 4 > /proc/sys/kernel/printk
-ok "Mounted kernel filesystems /dev, /proc, /sys."
+: >"$BOOTLOG"
+ok "Mounted Kernel File Systems: /dev, /proc, /sys."
 
 if ls /proc/device-tree/soc | grep -q virtio_mmio; then
-  info "Loading kernel modules..."
-  loaded=""
+  info "Starting Load Kernel Modules..."
+  n=0
   for m in $(cat /lib/modules/load.list); do
-    insmod "/lib/modules/$m" 2>/dev/null && loaded="$loaded ${m%.ko}"
+    insmod "/lib/modules/$m" 2>/dev/null && n=$((n + 1))
   done
-  ok "Loaded kernel modules:$loaded."
+  ok "Finished Load Kernel Modules: $n drivers for virtio, ext4, overlayfs and networking."
 fi
 
 if [ -e /proc/device-tree/soc/virtio_mmio@10001000 ]; then
   i=0
   while [ ! -b /dev/vda ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  if [ -b /dev/vda ]; then
+    ok "Found device /dev/vda: bootlet persistent disk ($(($(cat /sys/block/vda/size) / 2048)) MiB)."
+  fi
   mkdir -p /mnt/disk /mnt/lower /mnt/root
   # ext4 driver: replays the journal if the page was closed mid-write.
   if mount -t ext4 -o noatime,commit=1 /dev/vda /mnt/disk; then
-    ok "Mounted persistent disk /dev/vda ($(df -h /mnt/disk | awk 'NR==2 {print $2}'), journaled)."
+    # The disk sits under the overlay root and can't be unmounted at
+    # shutdown, so the kernel replays its journal on every boot. rcK leaves a
+    # marker after a clean shutdown; without it, the page was closed or
+    # reloaded while the system was running.
+    marker=/mnt/disk/root/var/lib/misc/clean-shutdown
+    if [ -e "$marker" ]; then
+      rm -f "$marker"
+    elif dmesg | grep -q 'vda.*recovery complete'; then
+      ok "Recovered the filesystem journal after an unclean shutdown (page closed or reloaded)."
+    fi
+    ok "Mounted /mnt/disk: persistent disk, journaled ext4, $(df -h /mnt/disk | awk 'NR==2 {print $4}') free."
     mkdir -p /mnt/disk/root /mnt/disk/work
     mount --bind / /mnt/lower
     if mount -t overlay overlay -o lowerdir=/mnt/lower,upperdir=/mnt/disk/root,workdir=/mnt/disk/work /mnt/root; then
       for d in dev proc sys; do mount --move /$d /mnt/root/$d; done
-      ok "Switched to persistent root filesystem (overlay on /dev/vda)."
+      ok "Reached target Initrd Root File System: overlay on /dev/vda."
+      ok "Switched Root to the persistent file system."
       # switch_root would delete the initramfs, which is the lower layer.
       exec chroot /mnt/root /sbin/init
     fi

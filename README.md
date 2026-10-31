@@ -142,7 +142,7 @@ flowchart LR
 
 <div align="center">
 <img src="docs/assets/boot.png" alt="The boot log in the browser: Linux kernel messages with timestamps, followed by systemd-style [ OK ] lines for loading modules, mounting the persistent disk, switching to the overlay root, configuring the network, and starting the shell" width="100%">
-<br><sub>The whole boot is visible: the kernel's log from its first instruction, then the guest's <code>[ OK ]</code> steps.</sub>
+<br><sub>The whole boot is visible: the kernel's log from its first instruction, then the guest's <code>[ OK ]</code> steps. The screen is cleared before the prompt; <code>/var/log/boot.log</code> keeps the steps.</sub>
 </div>
 
 Opening the page goes through these steps:
@@ -157,10 +157,16 @@ Opening the page goes through these steps:
 3. The kernel's `ecall`s (timer, IPI, remote fence, HSM, reset, debug console) are
    handled in Go, not by M-mode firmware.
 4. The guest's `/init` loads the virtio drivers, mounts the disk, and makes it the upper
-   layer of an overlay whose lower layer is the initramfs. It then hands over to BusyBox
-   `init`, which configures `eth0` and starts a shell. Each step prints a systemd-style
-   `[  OK  ]` line. From `/init` on, the console only shows kernel errors, so kernel
-   messages don't tear the status lines; `dmesg` has everything.
+   layer of an overlay whose lower layer is the initramfs. BusyBox `init` then runs
+   `/etc/init.d/rcS`. It mounts `/tmp`, `/run`, `/dev/pts` and `/dev/shm`, applies
+   `sysctl.conf`, sets the clock from the RTC, restores the random seed, starts `syslogd`,
+   `klogd` and `crond`, and configures `eth0`. Every step prints a systemd-style
+   `[  OK  ]` or `[FAILED]` line. Then the screen is cleared, as `getty` would do, before
+   the welcome message and the shell. The status lines stay in `/var/log/boot.log`, the
+   kernel log in `dmesg`, and service logs in `logread`. `poweroff` and `reboot` run
+   `/etc/init.d/rcK`, which stops the services, saves the random seed, and syncs the disk.
+   From `/init` on, the console only shows kernel errors, so kernel messages don't tear
+   the status lines.
 5. The worker calls `run(12ms)` in a loop. Between slices it posts console output, feeds
    keystrokes to the UART, and moves Wisp packets between the emulator and the WebSocket.
    When the guest idles, `run` returns how long until the next timer interrupt, and the
