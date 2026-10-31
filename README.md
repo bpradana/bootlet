@@ -321,6 +321,12 @@ The root filesystem survives page reloads:
   written since the last save. It stores them in the **Origin Private File System**, or
   in **IndexedDB** where OPFS sync handles aren't available. In OPFS, blocks are stored
   back to back with an index, so storage use matches what was written, not the disk size.
+- **The disk's contents don't sit in memory.** With OPFS, the emulator reads blocks from
+  storage on demand, synchronously, through the worker's OPFS access handle. Only blocks
+  written since the last save stay in memory. After a reload with 64 MB on the disk, the
+  emulator uses about 14 MiB more than a fresh boot (`e2e/boot.spec.ts` checks this).
+  The IndexedDB fallback is asynchronous, so there everything is loaded into memory at
+  boot. Hover the status indicator to see the emulator's memory use.
 - **Reset disk** wipes the saved blocks and reboots into the stock system.
 
 **Reloading or closing the tab is a power cut.** Whatever the guest wrote after the last
@@ -331,7 +337,9 @@ that safe:
 - **The kernel replays the journal** on the next mount, like after a crash on real
   hardware.
 
-At worst, the last couple of seconds of changes are gone; the filesystem itself stays
+At worst, the last few seconds of changes are gone: `/etc/sysctl.conf` makes the guest
+write changed file data out within a second (Linux's default is 30 s), the journal
+commits every second, and the browser saves every 2 s. The filesystem itself stays
 consistent. `TestCrashConsistency` checks this by "reloading" a guest in the middle of
 heavy file churn.
 
@@ -465,6 +473,7 @@ go run ./cmd/bootlet -kernel ../../guest/out/Image -initrd ../../guest/out/initr
 | A connection is refused immediately | The relay blocks that port or address. Private and loopback destinations need `-allow-private` (local testing only). |
 | `EXT4-fs error … deleted inode referenced` or `Data consistency error` | A corrupted disk. Disks from versions before the journal was added could corrupt on reload; they're deleted automatically on upgrade. If it ever happens again, use **Reset disk** (and please report it). |
 | The system misbehaves after a site update | The saved overlay still holds files from the previous version (for example apk's database). Use **Reset disk**. |
+| The machine restarted by itself, and the terminal says Chrome closed the tab to save memory | Chrome's Memory Saver discarded the background tab and reloaded it when you came back. Your files are safe; re-run what was interrupted (for `make`, finished files are kept). Keep the tab in front for long jobs, or add the site under **Settings → Performance → Always keep these sites active**. |
 | Status tooltip says changes are not saved | The browser blocks storage (for example, some private windows), or another tab holds the OPFS disk. Close the other tab and reload. |
 | `guestpack: sha256 mismatch` | The mirror's file differs from the pinned one. Alpine replaced the package: update `guest/manifest.toml` to the new version and hash. |
 | `guestpack: kernel lacks required built-in options` | The kernel in the manifest was built without a driver the emulator needs. Pick a kernel that has it built in (`=y`). |
@@ -480,11 +489,12 @@ go run ./cmd/bootlet -kernel ../../guest/out/Image -initrd ../../guest/out/initr
 - **Serial console only.** There is no framebuffer or graphical display.
 - **Interpreter speed.** CPU-heavy work runs at tens of MIPS. A decoded-block cache, or
   translating hot blocks to WebAssembly, would be the next step.
-- **Disk size vs. memory.** The disk is 1 GiB, but every block written is also held in
-  the page's memory, and downloads have no backpressure from the relay. In practice a
-  few hundred MB of installed software is the comfortable limit for a browser tab.
-- **Recent writes can be lost.** Closing the tab loses up to about 3 s of changes (the
-  journal commit interval plus the save interval). The filesystem stays consistent.
+- **Memory.** Guest RAM (`?mem=`, 128 MiB by default) is allocated up front. Disk
+  contents are read on demand with OPFS but held in memory with the IndexedDB fallback,
+  and downloads have no backpressure from the relay. WebAssembly memory never shrinks, so
+  a burst of writes raises the tab's footprint until it's reloaded.
+- **Recent writes can be lost.** Closing the tab loses up to about 4 s of changes
+  (writeback, journal commit, and save intervals). The filesystem stays consistent.
 - **Guest clock pauses aren't hidden.** After Stop and Start, the guest sees the
   wall-clock time that passed.
 

@@ -79,14 +79,17 @@ func (g *guestVM) waitFor(s string, timeout time.Duration) {
 // The filesystem must come back without errors.
 func TestCrashConsistency(t *testing.T) {
 	for trial := 0; trial < 4; trial++ {
-		disk := devices.NewDisk(1 << 30)
+		// The disk reads persisted blocks on demand from saved, as the
+		// browser does from OPFS.
+		saved := mapBacking{}
+		disk := devices.NewBackedDisk(1<<30, saved)
 		disk.Format("test")
-		saved := map[uint64][]byte{}
 		persist := func() {
 			idx, data := disk.TakeDirty()
 			for i, b := range idx {
-				saved[b] = data[i]
+				saved[b] = append([]byte(nil), data[i]...)
 			}
+			disk.Saved()
 		}
 		persist()
 
@@ -101,10 +104,7 @@ func TestCrashConsistency(t *testing.T) {
 		g.run(time.Duration(37*(trial+1)) * time.Millisecond) // unsaved writes are lost
 
 		// "Reload": boot from what was persisted.
-		restored := devices.NewDisk(1 << 30)
-		for b, data := range saved {
-			restored.Restore(b, data)
-		}
+		restored := devices.NewBackedDisk(1<<30, saved)
 		h := bootGuest(t, restored)
 		h.m.Input([]byte("ls -laR /root >/dev/null; find / -xdev >/dev/null; touch /root/new && echo che''cked\n"))
 		h.waitFor("checked", time.Minute)
@@ -112,6 +112,20 @@ func TestCrashConsistency(t *testing.T) {
 			t.Fatalf("trial %d: filesystem corrupted after crash:\n%s", trial, tail(h.out.String(), 1500))
 		}
 		fmt.Printf("trial %d: clean\n", trial)
+	}
+}
+
+// mapBacking is persistent storage for a test disk.
+type mapBacking map[uint64][]byte
+
+func (m mapBacking) ReadBlocks(idx []uint64, dst []byte) {
+	for i, b := range idx {
+		out := dst[i*devices.BlockSize : (i+1)*devices.BlockSize]
+		if data, ok := m[b]; ok {
+			copy(out, data)
+		} else {
+			clear(out)
+		}
 	}
 }
 

@@ -20,7 +20,15 @@ interface BootletAPI {
     instructions: number;
   };
   input(data: Uint8Array): void;
-  attachDisk(sizeMiB: number, idx: Uint32Array, data: Uint8Array): void;
+  /** OPFS: blocks are read on demand. IndexedDB: every stored block, restored into memory. */
+  attachDisk(
+    sizeMiB: number,
+    source: { empty: boolean; readBlocks(idx: Uint32Array, out: Uint8Array): void } | { idx: Uint32Array; data: Uint8Array },
+  ): void;
+  /** Confirms the oldest unconfirmed takeDirty() batch was persisted. */
+  diskSaved(): void;
+  /** Emulator memory use in MiB. */
+  memory(): number;
   takeDirty(): { idx: Uint32Array; data: Uint8Array } | null;
   resetDisk(sizeMiB: number): void;
   attachNet(): void;
