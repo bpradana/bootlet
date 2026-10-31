@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const RELAY = "ws://127.0.0.1:8089/";
+const RELAY = "ws://127.0.0.1:18089/"; // not 8089, so a relay you are running doesn't interfere
 
 async function bootToPrompt(page: Page) {
   const screen = page.locator(".xterm-rows");

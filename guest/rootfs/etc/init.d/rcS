@@ -1,31 +1,61 @@
 #!/bin/sh
+# System startup, run by BusyBox init. Each step is real and reports its
+# result in the style of systemd; the screen is cleared before the welcome
+# message, like getty does, and the status lines stay in /var/log/boot.log.
 . /lib/bootlet-status.sh
 
-mount -t tmpfs tmpfs /tmp
-mount -t tmpfs tmpfs /run
-mkdir -p /dev/pts && mount -t devpts devpts /dev/pts
-ok "Mounted /tmp, /run and /dev/pts."
-hostname -F /etc/hostname
-ok "Set hostname to $(hostname)."
-ip link set lo up
-ok "Brought up loopback interface lo."
+step "Mounted Temporary Directory /tmp." mount -t tmpfs -o mode=1777 tmpfs /tmp
+step "Mounted Runtime Directory /run." mount -t tmpfs -o mode=755 tmpfs /run
+mkdir -p /dev/pts /dev/shm
+step "Mounted Pseudo Terminals /dev/pts." mount -t devpts devpts /dev/pts
+step "Mounted Shared Memory /dev/shm." mount -t tmpfs -o mode=1777 tmpfs /dev/shm
+step "Created Volatile Files and Directories." \
+  mkdir -p /var/log /var/lib/misc /var/spool/cron/crontabs /var/tmp
+step "Applied Kernel Variables from /etc/sysctl.conf." sysctl -q -p /etc/sysctl.conf
+step "Set hostname to $(cat /etc/hostname)." hostname -F /etc/hostname
+step "Synchronized System Clock with RTC: $(date -u '+%a %Y-%m-%d %H:%M UTC')." hwclock -s -u
 
-# Networking: user-mode NAT provided by the emulator (see README).
+# Random seed: carried across boots, like systemd-random-seed.
+SEED=/var/lib/misc/random-seed
+if [ -s "$SEED" ]; then
+  cat "$SEED" >/dev/urandom
+  ok "Loaded Random Seed from the previous boot."
+fi
+step "Saved a fresh Random Seed." dd if=/dev/urandom of="$SEED" bs=512 count=1
+
+info "Starting System Logging Service..."
+step "Started System Logging Service (syslogd, read with logread)." syslogd -C128
+step "Started Kernel Logging Service (klogd)." klogd -c 4
+
+step "Brought up loopback interface lo." ip link set lo up
 if [ -e /sys/class/net/eth0 ]; then
-  ip link set eth0 up &&
+  if ip link set eth0 up &&
     ip addr add 10.0.2.15/24 dev eth0 &&
     ip route add default via 10.0.2.2 &&
-    echo "nameserver 10.0.2.3" > /etc/resolv.conf &&
-    ok "Configured network eth0: 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3." ||
+    echo "nameserver 10.0.2.3" >/etc/resolv.conf; then
+    ok "Configured network interface eth0: 10.0.2.15/24, gateway 10.0.2.2, DNS 10.0.2.3."
+    ok "Reached target Network."
+  else
     fail "Could not configure network interface eth0."
+  fi
 fi
-ok "Started login shell on the serial console (ttyS0)."
+
+step "Started Periodic Command Scheduler (crond)." crond -c /var/spool/cron/crontabs
+ok "Reached target Multi-User System."
+ok "Started Serial Getty on ttyS0."
+
+# Leave the end of the boot on screen for a moment, then clear it (screen
+# and scrollback) and keep the status lines in the log.
+sleep 0.6
+cp "$BOOTLOG" /var/log/boot.log 2>/dev/null
+printf '\033[H\033[2J\033[3J' >/dev/console
 
 cat /etc/motd
 if [ -e /sys/class/net/eth0 ]; then
-  echo "  Network: connect a relay with the network button in the toolbar, then try \`apk add python3\`."
+  echo "  Network: works while a relay is connected (network button in the toolbar). Try \`apk add python3\`."
 fi
 if grep -q ' / overlay ' /proc/mounts; then
   echo "  Changes to the filesystem are saved in this browser (toolbar: Reset disk)."
 fi
+echo "  Boot log: \`cat /var/log/boot.log\`, kernel log: \`dmesg\`, system log: \`logread\`."
 echo

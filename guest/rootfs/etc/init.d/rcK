@@ -1,0 +1,12 @@
+#!/bin/sh
+# System shutdown, run by BusyBox init before it signals every process.
+. /lib/bootlet-status.sh
+
+info "Stopping Periodic Command Scheduler..."
+step "Stopped Periodic Command Scheduler (crond)." killall crond
+step "Saved Random Seed for the next boot." dd if=/dev/urandom of=/var/lib/misc/random-seed bs=512 count=1
+step "Stopped Kernel Logging Service (klogd)." killall klogd
+step "Stopped System Logging Service (syslogd)." killall syslogd
+touch /var/lib/misc/clean-shutdown # tells the next boot that this one ended cleanly
+step "Synced file systems to disk." sync
+ok "Reached target System Shutdown."

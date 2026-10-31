@@ -17,8 +17,8 @@ export default defineConfig({
     {
       // -allow-private and -ports all let the guest reach the preview server
       // through the gateway address; never run a public relay like this.
-      command: "go run ../relay -addr 127.0.0.1:8089 -allow-private -ports all",
-      url: "http://127.0.0.1:8089/healthz",
+      command: "go run ../relay -addr 127.0.0.1:18089 -allow-private -ports all",
+      url: "http://127.0.0.1:18089/healthz",
       reuseExistingServer: !process.env.CI,
     },
   ],
