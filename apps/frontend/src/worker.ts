@@ -66,8 +66,10 @@ async function fetchAsset(url: string, label: string): Promise<Uint8Array> {
 async function boot() {
   post({ type: "state", state: "loading" });
   const go = new Go();
+  // OPFS is read on demand once the machine runs; only the IndexedDB
+  // fallback loads every stored block up front.
   const disk = openStore().then(
-    async (s) => ({ store: s, blocks: await s.load() }),
+    async (s) => ({ store: s, blocks: s.kind === "indexeddb" ? await s.load() : undefined }),
     (e: unknown) => ({ error: String(e instanceof Error ? e.message : e) }),
   );
   const [wasm, kernel, initrd] = await Promise.all([
@@ -82,8 +84,12 @@ async function boot() {
   api.loadInitrd(initrd);
   const d = await disk;
   if ("store" in d) {
-    store = d.store;
-    api.attachDisk(DISK_MIB, d.blocks.idx, d.blocks.data);
+    const s = (store = d.store);
+    if (s.kind === "opfs") {
+      api.attachDisk(DISK_MIB, { empty: s.empty(), readBlocks: (idx, out) => s.readBlocks(idx, out) });
+    } else {
+      api.attachDisk(DISK_MIB, d.blocks!);
+    }
     post({ type: "storage", backend: store.kind });
     setInterval(save, SAVE_INTERVAL_MS);
   } else {
@@ -95,14 +101,27 @@ async function boot() {
   post({ type: "state", state: "booting" });
 }
 
-// save persists disk blocks written since the last call.
+// A batch whose save failed. It is retried before taking a new one: the
+// emulator keeps unconfirmed batches in memory and releases them in order.
+let retry: { idx: Uint32Array; data: Uint8Array } | undefined;
+
+// save persists disk blocks written since the last call, then lets the
+// emulator drop them from memory.
 async function save() {
   if (!api || !store || saving) return;
-  const dirty = api.takeDirty();
-  if (!dirty) return;
-  saving = store
-    .save(dirty)
-    .catch((e) => post({ type: "storage", backend: "none", detail: `saving failed: ${e}` }))
+  const batch = retry ?? api.takeDirty();
+  if (!batch) return;
+  const s = store;
+  saving = s
+    .save(batch)
+    .then(() => {
+      retry = undefined;
+      api?.diskSaved();
+    })
+    .catch((e) => {
+      retry = batch;
+      post({ type: "storage", backend: "none", detail: `saving failed: ${e}` });
+    })
     .finally(() => (saving = undefined));
   await saving;
 }
@@ -179,7 +198,7 @@ function slice() {
   instructions += r.instructions;
   const now = performance.now();
   if (now - statsSince > 1000) {
-    post({ type: "stats", mips: instructions / (now - statsSince) / 1000 });
+    post({ type: "stats", mips: instructions / (now - statsSince) / 1000, memMiB: api.memory() });
     instructions = 0;
     statsSince = now;
   }
@@ -252,6 +271,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       if (!api || !store) return;
       pause();
       await saving; // don't let an in-flight save land after the wipe
+      retry = undefined;
       await store.clear();
       api.resetDisk(DISK_MIB);
       check(api.reset());

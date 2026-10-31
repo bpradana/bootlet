@@ -79,3 +79,30 @@ test("networking can be connected from the network dialog", async ({ page }) => 
   await page.reload();
   await expect(page.locator("#net")).toHaveText("Online");
 });
+
+test("a large disk is read on demand, not held in memory", async ({ page }) => {
+  const emulatorMiB = async () => {
+    await expect(page.locator("#status")).toHaveAttribute("title", /Emulator memory: \d+ MiB/);
+    return Number((await page.locator("#status").getAttribute("title"))!.match(/Emulator memory: (\d+) MiB/)![1]);
+  };
+  await page.goto("./?relay=");
+  let screen = await bootToPrompt(page);
+  const fresh = await emulatorMiB();
+  await page.keyboard.type(
+    "dd if=/dev/zero of=/root/big bs=1M count=64 2>/dev/null; echo marker >> /root/big; " +
+      "sha1sum /root/big > /root/big.sha1; echo wr''ote\n",
+  );
+  await expect(screen).toContainText("wrote", { timeout: 180_000 });
+  await page.waitForTimeout(6000); // writeback (~1 s), journal commit (1 s), save (2 s)
+
+  await page.reload();
+  screen = await bootToPrompt(page);
+  await page.keyboard.type("sha1sum -c /root/big.sha1\n");
+  await expect(screen).toContainText("/root/big: OK", { timeout: 180_000 });
+
+  // Holding the disk in memory would add the 64 MB file and its copies;
+  // read on demand, a reload costs about what a fresh boot does.
+  const reloaded = await emulatorMiB();
+  console.log(`emulator memory: fresh boot ${fresh} MiB, after reload with 64 MB on disk ${reloaded} MiB`);
+  expect(reloaded).toBeLessThan(fresh + 64);
+});

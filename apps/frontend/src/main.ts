@@ -88,6 +88,12 @@ let mips = 0;
 let progressLine = false;
 let recent = ""; // tail of console output, to spot the prompt across chunks
 let persistent = false;
+let storageNote = "";
+let emulatorMiB = 0; // memory the emulator uses, reported by the worker
+
+function renderTooltip() {
+  statusEl.title = [storageNote, emulatorMiB ? `Emulator memory: ${emulatorMiB} MiB` : ""].filter(Boolean).join("\n");
+}
 
 const netLabels: Record<NetState, string> = {
   off: "Network off",
@@ -155,9 +161,10 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     }
     case "storage":
       persistent = msg.backend !== "none";
-      statusEl.title = persistent
+      storageNote = persistent
         ? `Filesystem changes are saved in this browser (${msg.backend === "opfs" ? "Origin Private File System" : "IndexedDB"})`
         : `Changes are not saved: ${msg.detail ?? "browser storage unavailable"}`;
+      renderTooltip();
       render();
       break;
     case "net":
@@ -170,6 +177,8 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case "stats":
       mips = msg.mips;
+      emulatorMiB = msg.memMiB;
+      renderTooltip();
       render();
       break;
     case "state":
@@ -352,6 +361,15 @@ netDialog.addEventListener("close", () => term.focus());
 
 function startMessage(): ToWorker {
   return { type: "start", base: document.baseURI, relay, memMiB, quiet };
+}
+
+// Chrome's Memory Saver discards background tabs that use a lot of memory
+// and reloads them when they are shown again, which restarts the machine.
+if ((document as Document & { wasDiscarded?: boolean }).wasDiscarded) {
+  term.write(
+    "\x1b[33m[bootlet] Chrome closed this tab to save memory, so the machine restarted.\r\n" +
+      "          Your files are safe; re-run whatever was interrupted.\x1b[0m\r\n\r\n",
+  );
 }
 
 render();

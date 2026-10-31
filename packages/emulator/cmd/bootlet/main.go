@@ -172,8 +172,21 @@ loop:
 		instret, elapsed.Round(time.Millisecond), float64(instret)/elapsed.Seconds()/1e6)
 }
 
-// openDisk loads a sparse disk image file (or formats a new one) and returns
-// a function that writes changed blocks back to the file.
+// fileBacking reads persisted disk blocks from a sparse image file.
+type fileBacking struct{ f *os.File }
+
+func (b fileBacking) ReadBlocks(idx []uint64, dst []byte) {
+	for i, n := range idx {
+		out := dst[i*devices.BlockSize : (i+1)*devices.BlockSize]
+		if _, err := b.f.ReadAt(out, int64(n*devices.BlockSize)); err != nil {
+			clear(out) // past the end of the file: never written
+		}
+	}
+}
+
+// openDisk opens a sparse disk image file (formatting a new one) as a disk
+// that reads from the file on demand, and returns a function that writes
+// changed blocks back to it.
 func openDisk(path string, size uint64) (*devices.Disk, func(), error) {
 	f, err := os.OpenFile(path, os.O_RDWR|os.O_CREATE, 0o644)
 	if err != nil {
@@ -185,33 +198,26 @@ func openDisk(path string, size uint64) (*devices.Disk, func(), error) {
 	}
 	if st.Size() > 0 {
 		size = uint64(st.Size())
+	} else if err := f.Truncate(int64(size)); err != nil {
+		return nil, nil, err
 	}
-	disk := devices.NewDisk(size)
-	buf := make([]byte, devices.BlockSize)
-	for i := uint64(0); i*devices.BlockSize < uint64(st.Size()); i++ {
-		if _, err := f.ReadAt(buf, int64(i*devices.BlockSize)); err != nil {
-			return nil, nil, err
+	disk := devices.NewBackedDisk(size, fileBacking{f})
+	save := func() {
+		idx, data := disk.TakeDirty()
+		if len(idx) == 0 {
+			return
 		}
-		for _, b := range buf {
-			if b != 0 {
-				disk.Restore(i, buf)
-				break
+		for i, n := range idx {
+			if _, err := f.WriteAt(data[i], int64(n*devices.BlockSize)); err != nil {
+				log.Printf("saving disk: %v", err) // keep the batch in memory
+				return
 			}
 		}
+		disk.Saved()
 	}
 	if st.Size() == 0 {
 		disk.Format("bootlet")
-		if err := f.Truncate(int64(size)); err != nil {
-			return nil, nil, err
-		}
-	}
-	save := func() {
-		idx, data := disk.TakeDirty()
-		for i, n := range idx {
-			if _, err := f.WriteAt(data[i], int64(n*devices.BlockSize)); err != nil {
-				log.Printf("saving disk: %v", err)
-			}
-		}
+		save()
 	}
 	return disk, save, nil
 }

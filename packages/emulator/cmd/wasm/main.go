@@ -6,6 +6,8 @@
 package main
 
 import (
+	"runtime"
+	"runtime/debug"
 	"syscall/js"
 	"time"
 
@@ -21,6 +23,8 @@ var (
 )
 
 func main() {
+	// Wasm memory never shrinks, so keep the heap close to its live size.
+	debug.SetGCPercent(50)
 	api := js.Global().Get("Object").New()
 	api.Set("create", js.FuncOf(create))
 	api.Set("loadKernel", js.FuncOf(loadKernel))
@@ -30,6 +34,8 @@ func main() {
 	api.Set("input", js.FuncOf(input))
 	api.Set("attachDisk", js.FuncOf(attachDisk))
 	api.Set("takeDirty", js.FuncOf(takeDirty))
+	api.Set("diskSaved", js.FuncOf(diskSaved))
+	api.Set("memory", js.FuncOf(memory))
 	api.Set("resetDisk", js.FuncOf(resetDisk))
 	api.Set("attachNet", js.FuncOf(attachNet))
 	api.Set("netInput", js.FuncOf(netInput))
@@ -111,24 +117,70 @@ func input(_ js.Value, args []js.Value) any {
 	return nil
 }
 
-// attachDisk(sizeMiB: number, idx: Uint32Array, data: Uint8Array) restores a
-// persisted disk (block idx[i] is data[i*4096:]) or formats a new one when
-// idx is empty. Call before reset().
+// jsBacking reads persisted disk blocks through a synchronous JavaScript
+// function (an OPFS sync access handle in the worker).
+type jsBacking struct{ read js.Value }
+
+func (b jsBacking) ReadBlocks(idx []uint64, dst []byte) {
+	ids := js.Global().Get("Uint32Array").New(len(idx))
+	for i, n := range idx {
+		ids.SetIndex(i, n)
+	}
+	out := js.Global().Get("Uint8Array").New(len(dst))
+	b.read.Invoke(ids, out)
+	js.CopyBytesToGo(dst, out)
+}
+
+// backing is set when the disk is read on demand, so resetDisk can reuse it.
+var backing devices.Backing
+
+// attachDisk(sizeMiB, source) adds the persistent disk. Call before reset().
+// source is either {empty, readBlocks(idx: Uint32Array, out: Uint8Array)}:
+// blocks are read from storage on demand and only unsaved ones stay in
+// memory; or {idx: Uint32Array, data: Uint8Array}: every stored block is
+// restored into memory (block idx[i] is data[i*4096:]). An empty store gets
+// a freshly formatted filesystem.
 func attachDisk(_ js.Value, args []js.Value) any {
-	disk = devices.NewDisk(uint64(args[0].Int()) << 20)
-	n := args[1].Get("length").Int()
-	if n == 0 {
-		disk.Format("bootlet")
+	size := uint64(args[0].Int()) << 20
+	src := args[1]
+	if read := src.Get("readBlocks"); read.Type() == js.TypeFunction {
+		backing = jsBacking{read}
+		disk = devices.NewBackedDisk(size, backing)
+		if src.Get("empty").Bool() {
+			disk.Format("bootlet")
+		}
 	} else {
-		idx := bytesFrom(js.Global().Get("Uint8Array").New(args[1].Get("buffer"), args[1].Get("byteOffset"), n*4))
-		data := bytesFrom(args[2])
-		for i := 0; i < n; i++ {
-			b := uint64(idx[4*i]) | uint64(idx[4*i+1])<<8 | uint64(idx[4*i+2])<<16 | uint64(idx[4*i+3])<<24
-			disk.Restore(b, data[i*devices.BlockSize:(i+1)*devices.BlockSize])
+		disk = devices.NewDisk(size)
+		n := src.Get("idx").Get("length").Int()
+		if n == 0 {
+			disk.Format("bootlet")
+		} else {
+			ids := src.Get("idx")
+			data := bytesFrom(src.Get("data")) // one copy; blocks are sub-slices of it
+			for i := 0; i < n; i++ {
+				disk.Restore(uint64(ids.Index(i).Int()), data[i*devices.BlockSize:(i+1)*devices.BlockSize])
+			}
 		}
 	}
 	m.AttachDisk(disk)
 	return nil
+}
+
+// diskSaved() confirms that the batch from the oldest unconfirmed
+// takeDirty() was persisted, so it can be dropped from memory.
+func diskSaved(js.Value, []js.Value) any {
+	if disk != nil {
+		disk.Saved()
+	}
+	return nil
+}
+
+// memory(): number returns the emulator's memory use in MiB, as WebAssembly
+// memory obtained from the browser.
+func memory(js.Value, []js.Value) any {
+	var s runtime.MemStats
+	runtime.ReadMemStats(&s)
+	return float64(s.Sys >> 20)
 }
 
 // takeDirty(): {idx: Uint32Array, data: Uint8Array} | null returns the disk
@@ -145,19 +197,24 @@ func takeDirty(js.Value, []js.Value) any {
 	for i, n := range idx {
 		jsIdx.SetIndex(i, n)
 	}
-	flat := make([]byte, 0, len(data)*devices.BlockSize)
-	for _, b := range data {
-		flat = append(flat, b...)
+	// Copy block by block: a flat Go copy of a large batch would be garbage
+	// that wasm memory never gives back.
+	jsData := js.Global().Get("Uint8Array").New(len(data) * devices.BlockSize)
+	for i, b := range data {
+		js.CopyBytesToJS(jsData.Call("subarray", i*devices.BlockSize, (i+1)*devices.BlockSize), b)
 	}
-	jsData := js.Global().Get("Uint8Array").New(len(flat))
-	js.CopyBytesToJS(jsData, flat)
 	return map[string]any{"idx": jsIdx, "data": jsData}
 }
 
 // resetDisk(sizeMiB: number) replaces the disk with a freshly formatted one.
 // Call reset() afterwards.
 func resetDisk(_ js.Value, args []js.Value) any {
-	disk = devices.NewDisk(uint64(args[0].Int()) << 20)
+	size := uint64(args[0].Int()) << 20
+	if backing != nil {
+		disk = devices.NewBackedDisk(size, backing) // the caller cleared the store
+	} else {
+		disk = devices.NewDisk(size)
+	}
 	disk.Format("bootlet")
 	m.ReplaceDisk(disk)
 	return nil

@@ -10,32 +10,87 @@ import (
 // BlockSize is the granularity of Disk storage and dirty tracking.
 const BlockSize = 4096
 
-// Disk is a sparse in-memory disk image. Only blocks that were written hold
-// memory; the rest read as zeros. Written blocks are tracked so the host can
+// Backing is persistent storage for a Disk's blocks. ReadBlocks fills dst
+// (len(idx) blocks, in order) with the stored contents, and zeros for blocks
+// that were never stored. It is called synchronously from the emulator.
+type Backing interface {
+	ReadBlocks(idx []uint64, dst []byte)
+}
+
+// Disk is a sparse disk image. Written blocks are tracked so the host can
 // persist just the changes (to OPFS/IndexedDB in the browser, or a file).
+//
+// With a Backing, only blocks that are not yet persisted stay in memory:
+// those written since the last TakeDirty, and batches taken but not yet
+// confirmed with Saved. Everything else is read from the backing on demand,
+// so memory use does not grow with the amount of data on the disk.
+// Without one, every block lives in memory (blocks).
 type Disk struct {
-	size   uint64
-	blocks map[uint64][]byte
-	dirty  map[uint64]bool
+	size    uint64
+	backing Backing
+	blocks  map[uint64][]byte   // in-memory mode only: all stored blocks
+	dirty   map[uint64][]byte   // written since the last TakeDirty
+	pending []map[uint64][]byte // taken, not yet Saved; oldest first
+	scratch []byte              // reused buffer for backing reads
 }
 
 func NewDisk(size uint64) *Disk {
-	return &Disk{size: size &^ (BlockSize - 1), blocks: map[uint64][]byte{}, dirty: map[uint64]bool{}}
+	return &Disk{size: size &^ (BlockSize - 1), blocks: map[uint64][]byte{}, dirty: map[uint64][]byte{}}
+}
+
+// NewBackedDisk returns a disk whose persisted blocks live in b.
+func NewBackedDisk(size uint64, b Backing) *Disk {
+	d := NewDisk(size)
+	d.backing, d.blocks = b, nil
+	return d
 }
 
 func (d *Disk) Size() uint64 { return d.size }
 
+// cached returns the in-memory copy of block idx: unsaved data first, then
+// (without a backing) the stored blocks.
+func (d *Disk) cached(idx uint64) []byte {
+	if b := d.dirty[idx]; b != nil {
+		return b
+	}
+	for i := len(d.pending) - 1; i >= 0; i-- {
+		if b := d.pending[i][idx]; b != nil {
+			return b
+		}
+	}
+	return d.blocks[idx]
+}
+
 // ReadAt fills p from offset off.
 func (d *Disk) ReadAt(p []byte, off uint64) {
-	for len(p) > 0 {
-		idx, o := off/BlockSize, off%BlockSize
-		n := min(uint64(len(p)), BlockSize-o)
-		if b := d.blocks[idx]; b != nil {
-			copy(p[:n], b[o:])
+	var missing []uint64 // blocks to fetch from the backing
+	var missingAt []int  // ...and where they go in p
+	for pos := 0; pos < len(p); {
+		cur := off + uint64(pos)
+		idx, o := cur/BlockSize, cur%BlockSize
+		n := min(len(p)-pos, int(BlockSize-o))
+		if b := d.cached(idx); b != nil {
+			copy(p[pos:pos+n], b[o:])
+		} else if d.backing != nil {
+			missing = append(missing, idx)
+			missingAt = append(missingAt, pos)
 		} else {
-			clear(p[:n])
+			clear(p[pos : pos+n])
 		}
-		p, off = p[n:], off+n
+		pos += n
+	}
+	if len(missing) == 0 {
+		return
+	}
+	if need := len(missing) * BlockSize; cap(d.scratch) < need {
+		d.scratch = make([]byte, need)
+	}
+	buf := d.scratch[:len(missing)*BlockSize]
+	d.backing.ReadBlocks(missing, buf)
+	for i, pos := range missingAt {
+		o := int((off + uint64(pos)) % BlockSize)
+		n := min(len(p)-pos, BlockSize-o)
+		copy(p[pos:pos+n], buf[i*BlockSize+o:])
 	}
 }
 
@@ -44,42 +99,65 @@ func (d *Disk) WriteAt(p []byte, off uint64) {
 	for len(p) > 0 {
 		idx, o := off/BlockSize, off%BlockSize
 		n := min(uint64(len(p)), BlockSize-o)
-		b := d.blocks[idx]
+		b := d.dirty[idx]
 		if b == nil {
 			b = make([]byte, BlockSize)
-			d.blocks[idx] = b
+			if n < BlockSize { // partial write: start from the current contents
+				d.ReadAt(b, idx*BlockSize)
+			}
+			d.dirty[idx] = b
+			if d.blocks != nil {
+				d.blocks[idx] = b
+			}
 		}
 		copy(b[o:], p[:n])
-		d.dirty[idx] = true
 		p, off = p[n:], off+n
 	}
 }
 
-// Restore loads a previously persisted block without marking it dirty.
+// Restore loads a previously persisted block into an in-memory disk without
+// marking it dirty. data is kept, not copied.
 func (d *Disk) Restore(idx uint64, data []byte) {
-	if idx*BlockSize >= d.size {
+	if idx*BlockSize >= d.size || d.blocks == nil {
 		return
 	}
-	b := make([]byte, BlockSize)
-	copy(b, data)
-	d.blocks[idx] = b
+	d.blocks[idx] = data[:BlockSize:BlockSize]
 }
 
-// Empty reports whether nothing was ever written or restored.
-func (d *Disk) Empty() bool { return len(d.blocks) == 0 }
-
 // TakeDirty returns the indexes and contents of blocks written since the last
-// call, in ascending order, and clears the dirty set.
+// call, in ascending order, and clears the dirty set. With a backing, the
+// blocks stay in memory until Saved confirms they were persisted.
 func (d *Disk) TakeDirty() (idx []uint64, data [][]byte) {
 	for i := range d.dirty {
 		idx = append(idx, i)
 	}
 	sort.Slice(idx, func(a, b int) bool { return idx[a] < idx[b] })
 	for _, i := range idx {
-		data = append(data, append([]byte(nil), d.blocks[i]...))
+		data = append(data, d.dirty[i])
 	}
-	clear(d.dirty)
+	if d.backing != nil && len(idx) > 0 {
+		d.pending = append(d.pending, d.dirty)
+	}
+	d.dirty = map[uint64][]byte{}
 	return idx, data
+}
+
+// Saved tells the disk that the oldest batch returned by TakeDirty is now in
+// the backing, so its blocks can be dropped from memory.
+func (d *Disk) Saved() {
+	if len(d.pending) > 0 {
+		d.pending[0] = nil
+		d.pending = d.pending[1:]
+	}
+}
+
+// Unsaved returns the number of blocks held in memory awaiting persistence.
+func (d *Disk) Unsaved() int {
+	n := len(d.dirty)
+	for _, p := range d.pending {
+		n += len(p)
+	}
+	return n
 }
 
 // Format writes an empty filesystem (4 KiB blocks, root directory and

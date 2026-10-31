@@ -1,6 +1,8 @@
-// Persistent storage for the guest's /data disk. Only blocks the guest has
-// written are stored. OPFS is preferred (fast, synchronous access in
-// workers); IndexedDB is the fallback where OPFS sync handles are missing.
+// Persistent storage for the guest's root disk. Only blocks the guest has
+// written are stored. OPFS is preferred: its synchronous access handles let
+// the emulator read blocks on demand, so the disk's contents don't have to
+// sit in memory. IndexedDB is the fallback where OPFS sync handles are
+// missing; it is asynchronous, so everything is loaded into memory at boot.
 
 const BLOCK = 4096;
 
@@ -9,12 +11,25 @@ export interface Blocks {
   data: Uint8Array; // idx.length * 4096 bytes
 }
 
-export interface BlockStore {
-  kind: "opfs" | "indexeddb";
-  load(): Promise<Blocks>;
+interface StoreBase {
   save(blocks: Blocks): Promise<void>;
   clear(): Promise<void>;
 }
+
+export interface OPFSStore extends StoreBase {
+  kind: "opfs";
+  /** Whether nothing has been stored yet (a fresh disk). */
+  empty(): boolean;
+  /** Synchronously fills out with blocks idx; never-stored blocks read as zeros. */
+  readBlocks(idx: Uint32Array, out: Uint8Array): void;
+}
+
+export interface IndexedDBStore extends StoreBase {
+  kind: "indexeddb";
+  load(): Promise<Blocks>;
+}
+
+export type BlockStore = OPFSStore | IndexedDBStore;
 
 // Disks from earlier layouts, deleted when found: they were formatted
 // without a journal and can't be upgraded in place.
@@ -52,7 +67,7 @@ const NAME = "bootlet-root-v2";
 
 const WAL_MAGIC = 0x4c415742; // "BWAL"
 
-async function openOPFS(): Promise<BlockStore> {
+async function openOPFS(): Promise<OPFSStore> {
   const dir = await (await navigator.storage.getDirectory()).getDirectoryHandle(NAME, { create: true });
   // Compact layout: "blocks" holds stored blocks back to back in slot order,
   // and "index" holds the disk block number of each slot. Writing blocks at
@@ -111,18 +126,21 @@ async function openOPFS(): Promise<BlockStore> {
     apply({ idx, data });
   };
 
+  const stored = new Uint32Array(index.getSize() / 4);
+  index.read(stored, { at: 0 });
+  stored.forEach((b, slot) => slots.set(b, slot));
+  recover();
+
   return {
     kind: "opfs",
-    async load() {
-      const stored = new Uint32Array(index.getSize() / 4);
-      index.read(stored, { at: 0 });
-      stored.forEach((b, slot) => slots.set(b, slot));
-      recover();
-      const idx = new Uint32Array(slots.size);
-      for (const [b, slot] of slots) idx[slot] = b;
-      const data = new Uint8Array(idx.length * BLOCK);
-      blocks.read(data, { at: 0 });
-      return { idx, data };
+    empty: () => slots.size === 0,
+    readBlocks(idx, out) {
+      idx.forEach((b, i) => {
+        const dst = out.subarray(i * BLOCK, (i + 1) * BLOCK);
+        const slot = slots.get(b);
+        if (slot === undefined) dst.fill(0);
+        else blocks.read(dst, { at: slot * BLOCK });
+      });
     },
     async save(batch) {
       const n = batch.idx.length;
@@ -151,7 +169,7 @@ function request<T>(r: IDBRequest<T>): Promise<T> {
   });
 }
 
-async function openIndexedDB(): Promise<BlockStore> {
+async function openIndexedDB(): Promise<IndexedDBStore> {
   const open = indexedDB.open(NAME, 1);
   open.onupgradeneeded = () => open.result.createObjectStore("blocks");
   const db = await request(open);

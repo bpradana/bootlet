@@ -115,3 +115,88 @@ func TestFormatMultiGroup(t *testing.T) {
 		t.Fatalf("format touched %d blocks; the disk should stay sparse", len(idx))
 	}
 }
+
+// memBacking is a Backing that stores blocks in a map, counting reads.
+type memBacking struct {
+	blocks map[uint64][]byte
+	reads  int
+}
+
+func (m *memBacking) ReadBlocks(idx []uint64, dst []byte) {
+	m.reads++
+	for i, b := range idx {
+		out := dst[i*BlockSize : (i+1)*BlockSize]
+		if data, ok := m.blocks[b]; ok {
+			copy(out, data)
+		} else {
+			clear(out)
+		}
+	}
+}
+
+// save persists one batch the way the browser worker does.
+func (m *memBacking) save(d *Disk) {
+	idx, data := d.TakeDirty()
+	for i, b := range idx {
+		m.blocks[b] = append([]byte(nil), data[i]...)
+	}
+	d.Saved()
+}
+
+func TestBackedDisk(t *testing.T) {
+	back := &memBacking{blocks: map[uint64][]byte{}}
+	d := NewBackedDisk(1<<20, back)
+	read := func(off uint64, n int) string {
+		b := make([]byte, n)
+		d.ReadAt(b, off)
+		return string(b)
+	}
+
+	d.WriteAt([]byte("hello"), 4096*3+10)
+	if got := read(4096*3+10, 5); got != "hello" {
+		t.Fatalf("dirty read = %q", got)
+	}
+	idx, data := d.TakeDirty()
+	if len(idx) != 1 || d.Unsaved() != 1 {
+		t.Fatalf("taken %v, unsaved %d", idx, d.Unsaved())
+	}
+	if got := read(4096*3+10, 5); got != "hello" {
+		t.Fatalf("pending read = %q", got)
+	}
+	back.blocks[idx[0]] = append([]byte(nil), data[0]...)
+	d.Saved()
+	if d.Unsaved() != 0 {
+		t.Fatal("saved batch still held in memory")
+	}
+	if got := read(4096*3+10, 5); got != "hello" || back.reads == 0 {
+		t.Fatalf("backing read = %q (reads %d)", got, back.reads)
+	}
+	if got := read(4096*7, 4); got != "\x00\x00\x00\x00" {
+		t.Fatalf("never-stored block read %q", got)
+	}
+
+	// A partial write keeps the rest of the stored block, and a read
+	// spanning cached and stored blocks comes back whole.
+	d.WriteAt([]byte("HE"), 4096*3+10)
+	if got := read(4096*3+10, 5); got != "HEllo" {
+		t.Fatalf("partial write merged to %q", got)
+	}
+	d.WriteAt([]byte("next"), 4096*4)
+	back.save(d)
+	d.WriteAt([]byte("X"), 4096*4)
+	if got := read(4096*3+10, 4096); got[:5] != "HEllo" || got[4086:4090] != "Xext" {
+		t.Fatalf("spanning read = %q...%q", got[:5], got[4086:4090])
+	}
+}
+
+func TestBackedDiskFormat(t *testing.T) {
+	back := &memBacking{blocks: map[uint64][]byte{}}
+	d := NewBackedDisk(1<<30, back)
+	d.Format("t")
+	back.save(d)
+	sb := make([]byte, 1024)
+	d.ReadAt(sb, 1024)
+	if sb[56] != 0x53 || sb[57] != 0xef {
+		t.Fatal("superblock not readable through the backing")
+	}
+}

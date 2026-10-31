@@ -22,7 +22,7 @@ export type FromWorker =
   | { type: "state"; state: VMState; detail?: string }
   | { type: "progress"; label: string; loaded: number; total: number }
   | { type: "output"; data: Uint8Array }
-  | { type: "stats"; mips: number }
+  | { type: "stats"; mips: number; memMiB: number }
   | { type: "storage"; backend: "opfs" | "indexeddb" | "none"; detail?: string }
   | { type: "net"; state: NetState };
 
