@@ -26,35 +26,95 @@
       </div>
     </header>
     <main id="terminal" aria-label="Serial console"></main>
-    <dialog id="net-dialog" aria-labelledby="net-title">
+    <dialog id="net-dialog" class="net-dialog" aria-labelledby="net-title">
       <form method="dialog">
-        <h2 id="net-title">Network</h2>
-        <p class="net-status" id="net-status"></p>
+        <header class="dlg-head">
+          <span class="dlg-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3c2.5 2.7 3.8 5.7 3.8 9s-1.3 6.3-3.8 9c-2.5-2.7-3.8-5.7-3.8-9S9.5 5.7 12 3z" /></svg>
+          </span>
+          <div>
+            <h2 id="net-title">Network</h2>
+            <p class="dlg-status" id="net-status" data-state="off"><span class="dot"></span><span id="net-status-text"></span></p>
+          </div>
+          <button class="icon-btn" value="close" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+          </button>
+        </header>
+
         <div id="net-setup">
-          <p>
-            bootlet runs entirely in your browser, and browsers can't open network connections on their own. A small
-            relay program on your computer opens them for the guest, so <code>apk add</code>, <code>curl</code> and
-            <code>git</code> work.
+          <p class="dlg-lead">
+            Browsers can't open network connections on their own. A small relay program on your computer opens them for
+            the guest, so <code>apk add</code>, <code>curl</code> and <code>git</code> work. Nothing goes through a server.
           </p>
-          <ol>
-            <li>Download the relay: <span id="net-downloads"></span></li>
-            <li>
-              Run it. macOS and Linux: <code>chmod +x bootlet-relay-*</code>, then <code>./bootlet-relay-*</code>.
-              Windows: double-click it.
-            </li>
-            <li>
-              Open <a href="http://localhost:8089/" target="_blank" rel="noopener">http://localhost:8089</a>, which works
-              in every browser. Or connect this page below: Chrome and Edge ask once to allow access to this device;
-              Safari doesn't allow it.
-            </li>
-          </ol>
+
+          <section class="step">
+            <span class="step-num">1</span>
+            <div class="step-body">
+              <h3>Download the relay</h3>
+              <a class="btn btn-primary" id="net-download" href="#">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11m0 0l-4.5-4.5M12 15l4.5-4.5M5 19h14" /></svg>
+                <span id="net-download-label">Download</span>
+              </a>
+              <div class="chips" id="net-platforms" role="radiogroup" aria-label="Platform"></div>
+            </div>
+          </section>
+
+          <section class="step">
+            <span class="step-num">2</span>
+            <div class="step-body">
+              <h3>Run it</h3>
+              <div class="code" id="net-run-block">
+                <div class="code-head">
+                  <span id="net-shell">Terminal</span>
+                  <button type="button" class="copy-btn" id="net-copy" aria-label="Copy commands">
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2" /><path d="M5 15V5a1 1 0 011-1h10" /></svg>
+                    <span>Copy</span>
+                  </button>
+                </div>
+                <pre><code id="net-run"></code></pre>
+              </div>
+              <p class="hint" id="net-run-hint"></p>
+            </div>
+          </section>
+
+          <section class="step">
+            <span class="step-num">3</span>
+            <div class="step-body">
+              <h3>Use it</h3>
+              <div class="options">
+                <div class="option">
+                  <div class="option-title">Open bootlet from the relay <span class="badge">Every browser</span></div>
+                  <p>The relay serves bootlet too, already connected.</p>
+                  <a class="btn" href="http://localhost:8089/" target="_blank" rel="noopener">
+                    Open localhost:8089
+                    <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 01-1 1H5a1 1 0 01-1-1V7a1 1 0 011-1h5" /></svg>
+                  </a>
+                </div>
+                <div class="option">
+                  <div class="option-title">Connect this page <span class="badge">Chrome · Edge</span></div>
+                  <p>Your browser asks once to allow access to this device. Not supported in Safari.</p>
+                  <div class="connect-row">
+                    <input id="net-url" type="text" spellcheck="false" aria-label="Relay address" value="ws://127.0.0.1:8089/" />
+                    <button type="button" class="btn btn-primary" id="net-connect">Connect</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </section>
         </div>
-        <label class="net-url">Relay <input id="net-url" type="text" spellcheck="false" value="ws://127.0.0.1:8089/" /></label>
-        <div class="net-actions">
-          <button id="net-connect" type="button">Connect</button>
-          <button id="net-disconnect" type="button">Disconnect</button>
-          <button value="close">Close</button>
+
+        <div id="net-online" class="online-panel" hidden>
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M8 12.5l2.5 2.5L16 9.5" /></svg>
+          <div>
+            <p><strong>The guest is online.</strong></p>
+            <p class="hint">Try <code>apk add python3</code> or <code>curl -sI https://example.com</code> in the terminal.</p>
+          </div>
         </div>
+
+        <footer class="dlg-foot">
+          <button type="button" class="btn btn-danger" id="net-disconnect">Disconnect</button>
+          <button class="btn" value="close">Done</button>
+        </footer>
       </form>
     </dialog>
     <script type="module" src="/src/main.ts"></script>

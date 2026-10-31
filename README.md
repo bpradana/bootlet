@@ -255,6 +255,11 @@ static page can't reach the network by itself. bootlet splits the problem in two
 
 ### The relay on your computer
 
+<div align="center">
+<img src="docs/assets/network.png" alt="The network dialog: a download button for the detected platform with chips for the others, a terminal code block with a copy button showing the exact commands to run the relay, and two options: open bootlet from the relay at localhost:8089, or connect this page" width="100%">
+<br><sub>The network menu walks through downloading, running, and connecting the relay.</sub>
+</div>
+
 The relay is one self-contained binary (about 22 MB, built per OS by
 `.github/workflows/release.yml` when a `v*` tag is pushed). Run it, and it:
 

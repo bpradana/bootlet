@@ -218,36 +218,114 @@ resetDiskBtn.onclick = () => {
 // Network dialog.
 const netDialog = document.getElementById("net-dialog") as HTMLDialogElement;
 const netStatus = document.getElementById("net-status")!;
+const netStatusText = document.getElementById("net-status-text")!;
 const netSetup = document.getElementById("net-setup")!;
+const netOnline = document.getElementById("net-online")!;
 const netURL = document.getElementById("net-url") as HTMLInputElement;
 const netConnect = document.getElementById("net-connect") as HTMLButtonElement;
 const netDisconnect = document.getElementById("net-disconnect") as HTMLButtonElement;
+const netDownload = document.getElementById("net-download") as HTMLAnchorElement;
+const netDownloadLabel = document.getElementById("net-download-label")!;
+const netPlatforms = document.getElementById("net-platforms")!;
+const netRun = document.getElementById("net-run")!;
+const netRunHint = document.getElementById("net-run-hint")!;
+const netCopy = document.getElementById("net-copy") as HTMLButtonElement;
+const netShell = document.getElementById("net-shell")!;
 let netState: NetState = "off";
 
-const downloads: [string, string][] = [
-  ["macOS (Apple silicon)", "darwin-arm64"],
-  ["macOS (Intel)", "darwin-amd64"],
-  ["Linux (x86-64)", "linux-amd64"],
-  ["Linux (ARM64)", "linux-arm64"],
-  ["Windows", "windows-amd64.exe"],
+type Platform = { id: string; label: string; chip: string };
+const platforms: Platform[] = [
+  { id: "darwin-arm64", label: "macOS (Apple silicon)", chip: "macOS · Apple silicon" },
+  { id: "darwin-amd64", label: "macOS (Intel)", chip: "macOS · Intel" },
+  { id: "linux-amd64", label: "Linux (x86-64)", chip: "Linux · x86-64" },
+  { id: "linux-arm64", label: "Linux (ARM64)", chip: "Linux · ARM64" },
+  { id: "windows-amd64", label: "Windows", chip: "Windows" },
 ];
-document.getElementById("net-downloads")!.append(
-  ...downloads.flatMap(([label, file], i) => {
-    const a = Object.assign(document.createElement("a"), { href: RELEASES + file, textContent: label });
-    return i === 0 ? [a] : [document.createTextNode(" · "), a];
+
+function detectPlatform(): string {
+  const ua = navigator.userAgent;
+  const hint = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform ?? "";
+  if (/win/i.test(hint) || /Windows/.test(ua)) return "windows-amd64";
+  if (/mac/i.test(hint) || /Mac OS X|Macintosh/.test(ua)) return "darwin-arm64";
+  return /aarch64|arm64/i.test(ua) ? "linux-arm64" : "linux-amd64";
+}
+
+// The commands to run a downloaded relay, without prompts (that is what Copy
+// copies), and a hint shown under them.
+function runInstructions(id: string): { lines: string[]; hint: string } {
+  const file = `bootlet-relay-${id}${id.startsWith("windows") ? ".exe" : ""}`;
+  if (id.startsWith("windows")) {
+    return {
+      lines: ["cd $HOME\\Downloads", `.\\${file}`],
+      hint: "PowerShell, or double-click the file. If SmartScreen warns, choose More info → Run anyway.",
+    };
+  }
+  if (id.startsWith("darwin")) {
+    return {
+      lines: ["cd ~/Downloads", `chmod +x ${file}`, `xattr -c ${file}`, `./${file}`],
+      hint: "xattr clears the download quarantine, so macOS lets the unsigned binary run.",
+    };
+  }
+  return { lines: ["cd ~/Downloads", `chmod +x ${file}`, `./${file}`], hint: "Keep it running while you use bootlet." };
+}
+
+let platform = detectPlatform();
+function selectPlatform(id: string) {
+  platform = id;
+  const p = platforms.find((x) => x.id === id)!;
+  netDownload.href = RELEASES + id + (id.startsWith("windows") ? ".exe" : "");
+  netDownloadLabel.textContent = `Download for ${p.label}`;
+  for (const chip of netPlatforms.children) chip.setAttribute("aria-checked", String((chip as HTMLElement).dataset.id === id));
+  const { lines, hint } = runInstructions(id);
+  const prompt = id.startsWith("windows") ? "PS> " : "$ ";
+  netShell.textContent = id.startsWith("windows") ? "PowerShell" : "Terminal";
+  netRun.replaceChildren(
+    ...lines.flatMap((line, i) => [
+      Object.assign(document.createElement("span"), { className: "prompt", textContent: prompt }),
+      document.createTextNode(line + (i < lines.length - 1 ? "\n" : "")),
+    ]),
+  );
+  netRunHint.textContent = hint;
+}
+netPlatforms.append(
+  ...platforms.map((p) => {
+    const b = Object.assign(document.createElement("button"), { type: "button", className: "chip", textContent: p.chip });
+    b.dataset.id = p.id;
+    b.setAttribute("role", "radio");
+    b.onclick = () => selectPlatform(p.id);
+    return b;
   }),
 );
+selectPlatform(platform);
+
+netCopy.onclick = async () => {
+  try {
+    await navigator.clipboard.writeText(runInstructions(platform).lines.join("\n"));
+    netCopy.dataset.copied = "";
+    netCopy.querySelector("span")!.textContent = "Copied";
+    setTimeout(() => {
+      delete netCopy.dataset.copied;
+      netCopy.querySelector("span")!.textContent = "Copy";
+    }, 1500);
+  } catch {
+    // clipboard unavailable (insecure context): the text is still selectable
+  }
+};
 
 function renderNetDialog() {
   const statusText: Record<NetState, string> = {
     off: "Not connected. The guest is offline.",
     connecting: `Connecting to ${relay}…`,
-    online: servedByRelay ? "Online through the relay that serves this page." : `Online through ${relay}.`,
-    offline: `Can't reach ${relay}. Is the relay running? Retrying automatically.`,
+    online: servedByRelay ? "Online through the relay serving this page" : `Online through ${relay}`,
+    offline: `Can't reach ${relay}. Is the relay running? Retrying…`,
   };
-  netStatus.textContent = statusText[netState];
+  netStatus.dataset.state = netState;
+  netStatusText.textContent = statusText[netState];
   netSetup.hidden = netState === "online";
-  netDisconnect.disabled = netState === "off";
+  netOnline.hidden = netState !== "online";
+  netDisconnect.hidden = netState === "off" || servedByRelay;
+  netConnect.disabled = netState === "connecting";
+  netConnect.textContent = netState === "connecting" ? "Connecting…" : "Connect";
 }
 
 netEl.onclick = () => {
@@ -256,8 +334,14 @@ netEl.onclick = () => {
   netDialog.showModal();
 };
 netConnect.onclick = () => {
-  relay = netURL.value.trim();
+  relay = netURL.value.trim() || LOCAL_RELAY;
   send({ type: "relay", url: relay });
+};
+netURL.onkeydown = (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    netConnect.click();
+  }
 };
 netDisconnect.onclick = () => {
   relay = "";
