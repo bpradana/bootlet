@@ -2,3 +2,11 @@ export PATH=/bin:/sbin:/usr/bin:/usr/sbin
 export HOME=/root TERM=xterm-256color
 export PS1='\u@\h:\w\$ '
 cd ~
+
+# A serial console can't tell Linux the window size, so it assumes 80x24.
+# resize asks the terminal for its real size; run it again after resizing
+# the browser window.
+# (resize asks on stderr, so only its stdout is silenced.)
+if [ -t 0 ]; then
+  resize >/dev/null
+fi

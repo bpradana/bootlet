@@ -55,7 +55,7 @@ func (g *guestVM) run(d time.Duration) {
 	end := time.Now().Add(d)
 	for time.Now().Before(end) {
 		res := g.m.Run(20 * time.Millisecond)
-		g.out.Write(g.m.Output())
+		g.out.Write(console(g.m))
 		if res.Idle {
 			time.Sleep(time.Millisecond)
 		}
@@ -113,6 +113,17 @@ func TestCrashConsistency(t *testing.T) {
 		}
 		fmt.Printf("trial %d: clean\n", trial)
 	}
+}
+
+// console returns the guest's new console output and, like a real terminal,
+// answers cursor-position queries (the login shell runs resize, which asks
+// for one) with an 80x24 size.
+func console(m *machine.Machine) []byte {
+	out := m.Output()
+	if bytes.Contains(out, []byte("\x1b[6n")) {
+		m.Input([]byte("\x1b[24;80R"))
+	}
+	return out
 }
 
 func tail(s string, n int) string {
