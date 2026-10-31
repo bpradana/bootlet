@@ -60,6 +60,12 @@ func TestBoot(t *testing.T) {
 	var instret uint64
 	start := time.Now()
 	// waitFor runs the machine until the console output contains s.
+	var full bytes.Buffer
+	defer func() {
+		if t.Failed() {
+			t.Logf("FULL:\n%q", full.String())
+		}
+	}()
 	waitFor := func(s string, timeout time.Duration) {
 		t.Helper()
 		deadline := time.Now().Add(timeout)
@@ -69,7 +75,9 @@ func TestBoot(t *testing.T) {
 			}
 			res := m.Run(20 * time.Millisecond)
 			instret += res.Instructions
-			out.Write(m.Output())
+			b := console(m)
+			out.Write(b)
+			full.Write(b)
 			if res.Halted {
 				t.Fatalf("guest halted; output:\n%s", out.String())
 			}
@@ -122,6 +130,7 @@ func TestBoot(t *testing.T) {
 	out.Reset()
 	m.Input([]byte("reboot\n"))
 	waitFor("Welcome to bootlet", 2*time.Minute) // printed only once the new boot starts
+	out.Reset()                                  // drop the prompt from before the reboot
 	waitFor("root@bootlet:~# ", time.Minute)
 	out.Reset()
 	m.Input([]byte("cat /etc/marker; echo re''ad\n"))
@@ -138,6 +147,6 @@ func TestBoot(t *testing.T) {
 			t.Fatalf("poweroff did not halt; output:\n%s", out.String())
 		}
 		m.Run(20 * time.Millisecond)
-		out.Write(m.Output())
+		out.Write(console(m))
 	}
 }

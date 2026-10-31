@@ -58,4 +58,5 @@ if grep -q ' / overlay ' /proc/mounts; then
   echo "  Changes to the filesystem are saved in this browser (toolbar: Reset disk)."
 fi
 echo "  Boot log: \`cat /var/log/boot.log\`, kernel log: \`dmesg\`, system log: \`logread\`."
+echo "  Resized the window? Run \`resize\` so programs use the full width."
 echo
