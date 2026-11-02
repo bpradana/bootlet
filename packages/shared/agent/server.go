@@ -71,6 +71,10 @@ func Handle(req Request, payload []byte) (rep Reply, data []byte) {
 	switch req.Op {
 	case "hello":
 		rep.Version, rep.Home = Version, Home
+	case "stats":
+		var st Stats
+		st, err = ReadStats()
+		rep.Stats = &st
 	case "list":
 		rep.Entries, err = list(req.Path)
 	case "stat":

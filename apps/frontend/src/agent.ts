@@ -99,6 +99,10 @@ export class AgentClient {
     return (await this.call({ op: "list", path })).reply.entries ?? [];
   }
 
+  async stats() {
+    return (await this.call({ op: "stats" })).reply.stats!;
+  }
+
   async stat(path: string) {
     return (await this.call({ op: "stat", path })).reply.entry!;
   }

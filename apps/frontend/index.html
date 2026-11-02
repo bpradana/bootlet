@@ -20,7 +20,7 @@
           <span class="dot"></span><span id="status-text">Starting…</span>
         </span>
         <button class="net" id="net" type="button" data-state="off" aria-haspopup="dialog">Network off</button>
-        <button class="files-btn" id="files-toggle" type="button" aria-pressed="false" aria-controls="files" title="Browse the guest's files (drag and drop to upload)">
+        <button class="files-btn" id="files-toggle" type="button" aria-pressed="false" aria-controls="files" title="Files and live system stats of the guest">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
           Files
         </button>
@@ -32,10 +32,14 @@
     <div class="workspace">
       <main id="terminal" aria-label="Serial console"></main>
       <div class="splitter" id="files-splitter" role="separator" aria-orientation="vertical" aria-label="Resize file panel" tabindex="0" hidden></div>
-      <aside class="files" id="files" aria-label="Files" hidden>
+      <aside class="files" id="files" aria-label="Side panel" hidden>
         <header class="files-head">
           <div class="files-bar">
-            <h2>Files</h2>
+            <div class="tabs" role="tablist" aria-label="Side panel">
+              <button type="button" role="tab" id="tab-files" aria-controls="files-view" aria-selected="true">Files</button>
+              <button type="button" role="tab" id="tab-system" aria-controls="sys-view" aria-selected="false" tabindex="-1">System</button>
+            </div>
+            <span class="files-tools" id="files-tools">
             <button type="button" class="tool" id="files-up" title="Parent folder (Backspace)" aria-label="Parent folder">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5" /></svg>
             </button>
@@ -51,12 +55,14 @@
             <button type="button" class="tool" id="files-upload" title="Upload files" aria-label="Upload files">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 20h14" /></svg>
             </button>
-            <button type="button" class="tool" id="files-close" title="Close" aria-label="Close files">
+            </span>
+            <button type="button" class="tool" id="files-close" title="Close" aria-label="Close the side panel">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
             </button>
           </div>
-          <nav class="crumbs" id="files-crumbs" aria-label="Folder path"></nav>
         </header>
+        <div class="files-view" id="files-view" role="tabpanel" aria-labelledby="tab-files">
+        <nav class="crumbs" id="files-crumbs" aria-label="Folder path"></nav>
         <div class="files-cols" aria-hidden="true"><span></span><span>Name</span><span>Size</span><span>Modified</span></div>
         <div class="files-list" id="files-list" role="listbox" aria-label="Folder contents" aria-multiselectable="true" tabindex="0"></div>
         <p class="files-msg" id="files-msg" hidden></p>
@@ -64,6 +70,8 @@
         <ul class="transfers" id="files-transfers" aria-label="Transfers" hidden></ul>
         <p class="files-hint" id="files-hint">Drop files here to upload. Drag items onto a folder to move them (hold Alt/Option to copy).</p>
         <input type="file" id="files-input" multiple hidden />
+        </div>
+        <div class="sys-view" id="sys-view" role="tabpanel" aria-labelledby="tab-system" hidden></div>
       </aside>
     </div>
     <div class="menu" id="files-menu" role="menu" hidden></div>

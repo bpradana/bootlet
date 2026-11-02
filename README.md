@@ -53,7 +53,7 @@ Python 3.14.10 on riscv64
 - [The guest](#the-guest)
 - [Networking](#networking)
 - [Persistent storage](#persistent-storage)
-- [File explorer](#file-explorer)
+- [File explorer and system stats](#file-explorer-and-system-stats)
 - [Emulator API](#emulator-api)
 - [Performance](#performance)
 - [Deployment](#deployment)
@@ -72,6 +72,7 @@ Python 3.14.10 on riscv64
 | 🌐 **Networking** | virtio-net plus a user-mode TCP/IP stack in Go (like QEMU's slirp). Guest connections travel as [Wisp](https://github.com/MercuryWorkshop/wisp-protocol) streams over a WebSocket to a relay running on your own computer, which also serves the site. |
 | 💾 **Persistent root filesystem** | The whole filesystem is an overlay on a 1 GiB sparse virtio disk, saved to the Origin Private File System (or IndexedDB). Only changed 4 KiB blocks are written. **Reset disk** restores the stock system. |
 | 📂 **File explorer** | A side panel browses the guest's whole filesystem. Drop files or folders from your computer to upload them, drag items onto folders to move them, and drag files out (Chrome, Edge) or double-click to download. |
+| 📊 **Live system stats** | The panel's System tab shows the guest's CPU, memory, storage, network, and top processes, plus the emulator's speed (MIPS) and memory, with a history graph. |
 | 💤 **Idles at idle** | When the guest executes `wfi`, the worker sleeps until the next timer event, keystroke, or network packet, so a VM at a prompt costs almost no CPU. |
 | 🧩 **No toolchain for the guest** | `guestpack` (pure Go) downloads and verifies pinned Alpine packages and packs the initramfs. The file explorer's guest agent is cross-compiled by Go itself. No cross compiler, Buildroot, or Docker is needed. |
 | 🖥️ **Native and WASM from one codebase** | The `machine` package drives both `cmd/bootlet` (a terminal runner with direct sockets) and `cmd/wasm` (the browser build). |
@@ -352,7 +353,7 @@ heavy file churn.
 Hover the status indicator to see which backend is in use. The native runner keeps the
 same disk format in a sparse file (`-disk guest/disk.img`).
 
-## File explorer
+## File explorer and system stats
 
 <div align="center">
 <img src="docs/assets/files.png" alt="The file panel beside the terminal, showing /root with a folder, a symlink and files with their sizes and modification times" width="100%">
@@ -380,6 +381,19 @@ a framed protocol: a JSON header plus raw bytes (`packages/shared/agent`). The w
 only relays bytes. Files move in 256 KiB chunks at about 4.5 MB/s up and 10 MB/s down
 natively, and a few times slower in the browser. Panel width changes the terminal
 width, so run `resize` afterwards.
+
+The **System** tab shows live stats:
+
+- **Guest:** CPU (user, system, and I/O wait, with a two-minute graph), memory (used,
+  cache, free), the persistent disk and `/tmp`, network throughput, uptime and load,
+  and the top processes by CPU and memory.
+- **Emulator:** speed in MIPS (with a graph), the tab's memory, and the browser storage
+  in use.
+
+The agent reads the guest numbers from `/proc` every 2 s, but only while the tab is on
+screen. Each poll costs the guest about 1.7M instructions, a few percent of its CPU at
+browser speed. The agent itself shows up in the process list. It skips kernel threads,
+which are most of the guest's tasks and the expensive part to read.
 
 ## Emulator API
 

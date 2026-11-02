@@ -39,6 +39,7 @@ const (
 //	rename Path, To, Overwrite    (moves across filesystems too)
 //	copy   Path, To, Overwrite    (directories recursively)
 //	remove Path                   (directories recursively)
+//	stats                         → Stats (for the System tab)
 //
 // Paths are absolute. Without Overwrite, rename and copy fail with code
 // "exist" when To exists.
@@ -66,6 +67,7 @@ type Reply struct {
 	Entries []Entry `json:"entries,omitempty"`
 	Entry   *Entry  `json:"entry,omitempty"`
 	EOF     bool    `json:"eof,omitempty"`
+	Stats   *Stats  `json:"stats,omitempty"`
 }
 
 // Entry describes a file. Type is "file", "dir", "link" or "other"; for a

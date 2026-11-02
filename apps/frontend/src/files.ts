@@ -1,15 +1,18 @@
-// The file explorer: a side panel that browses the guest's filesystem through
-// bootlet-agent. Files and folders dropped from the computer are uploaded;
+// The side panel. Its Files tab browses the guest's filesystem through
+// bootlet-agent: files and folders dropped from the computer are uploaded;
 // items dragged onto a folder (or a crumb) are moved, or copied with
 // Alt/Option; in Chrome and Edge a file can be dragged out to the desktop.
+// Its System tab shows live stats (system.ts).
 import type { AgentEntry } from "@bootlet/shared";
 import { AgentClient, AgentError } from "./agent";
+import { initSystem } from "./system";
 
 /** Drag data type for guest paths (a JSON array), also accepted by the terminal. */
 export const pathsType = "application/x-bootlet-paths";
 
 const WIDTH_KEY = "bootlet.files.width";
 const OPEN_KEY = "bootlet.files.open";
+const TAB_KEY = "bootlet.panel.tab";
 const DRAG_OUT_MAX = 8 << 20; // files prefetched so they can be dragged out
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -117,6 +120,43 @@ export function initFiles(opts: FilesOptions) {
   let loading = false;
   let vmNote = "Waiting for the guest to boot…";
 
+  // ---- tabs ----
+
+  type Tab = "files" | "system";
+  const tabs: Record<Tab, { button: HTMLButtonElement; view: HTMLElement }> = {
+    files: { button: $<HTMLButtonElement>("tab-files"), view: $("files-view") },
+    system: { button: $<HTMLButtonElement>("tab-system"), view: $("sys-view") },
+  };
+  let tab: Tab = store.get(TAB_KEY) === "system" ? "system" : "files";
+  const system = initSystem(
+    client,
+    tabs.system.view,
+    () => !panel.hidden && tab === "system",
+    () => vmNote,
+  );
+
+  function showTab(t: Tab, focus = false) {
+    tab = t;
+    store.set(TAB_KEY, t);
+    for (const [name, { button, view }] of Object.entries(tabs) as [Tab, (typeof tabs)[Tab]][]) {
+      const on = name === t;
+      button.setAttribute("aria-selected", String(on));
+      button.tabIndex = on ? 0 : -1;
+      view.hidden = !on;
+    }
+    $("files-tools").hidden = t !== "files";
+    if (t === "files" && client.ready && !cwd && !panel.hidden) void navigate(client.home);
+    if (focus) tabs[t].button.focus();
+    system.update();
+  }
+  tabs.files.button.onclick = () => showTab("files");
+  tabs.system.button.onclick = () => showTab("system");
+  for (const { button } of Object.values(tabs)) {
+    button.onkeydown = (e) => {
+      if (e.key === "ArrowLeft" || e.key === "ArrowRight") showTab(tab === "files" ? "system" : "files", true);
+    };
+  }
+
   // ---- open / close / resize ----
 
   const setWidth = (w: number) => {
@@ -130,13 +170,15 @@ export function initFiles(opts: FilesOptions) {
     splitter.hidden = !open;
     toggleBtn.setAttribute("aria-pressed", String(open));
     store.set(OPEN_KEY, open ? "1" : "");
-    if (open) {
+    if (open && tab === "files") {
       if (client.ready && !cwd) void navigate(client.home);
       list.focus();
     }
+    system.update();
   }
   toggleBtn.onclick = () => setOpen(!!panel.hidden);
   $("files-close").onclick = () => setOpen(false);
+  showTab(tab);
   if (store.get(OPEN_KEY)) setOpen(true);
 
   splitter.onpointerdown = (e) => {
@@ -768,7 +810,7 @@ export function initFiles(opts: FilesOptions) {
 
   // The whole panel takes uploads into the current folder.
   panel.addEventListener("dragover", (e) => {
-    if (!client.ready || !cwd || !(internal(e.dataTransfer) || external(e.dataTransfer))) return;
+    if (tab !== "files" || !client.ready || !cwd || !(internal(e.dataTransfer) || external(e.dataTransfer))) return;
     e.preventDefault();
     e.dataTransfer!.dropEffect = external(e.dataTransfer) ? "copy" : e.altKey ? "copy" : "none";
     showDrop(e.dataTransfer, cwd, e.altKey);
@@ -777,7 +819,7 @@ export function initFiles(opts: FilesOptions) {
     if (!panel.contains(e.relatedTarget as Node)) hideDrop();
   });
   panel.addEventListener("drop", (e) => {
-    if (!client.ready || !cwd) return;
+    if (tab !== "files" || !client.ready || !cwd) return;
     e.preventDefault();
     hideDrop();
     if (external(e.dataTransfer)) void onDrop(e, cwd);
@@ -788,8 +830,9 @@ export function initFiles(opts: FilesOptions) {
   // ---- machine state ----
 
   client.onReady = (ready) => {
+    system.update();
     if (ready) {
-      if (!panel.hidden) void navigate(cwd || client.home);
+      if (!panel.hidden && tab === "files") void navigate(cwd || client.home);
     } else {
       entries = [];
       for (const c of cached.values()) URL.revokeObjectURL(c.url);
@@ -810,7 +853,7 @@ export function initFiles(opts: FilesOptions) {
       } else {
         vmNote =
           state === "stopped"
-            ? "The machine is stopped. Press Start to browse files."
+            ? "The machine is stopped. Press Start to continue."
             : state === "halted"
               ? "The machine is powered off."
               : state === "error"
@@ -819,6 +862,9 @@ export function initFiles(opts: FilesOptions) {
         client.reset(state === "stopped" ? "the machine was stopped" : "the guest restarted");
       }
       render();
+      system.update();
     },
+    /** Emulator stats from the worker, for the System tab. */
+    emulator: (mips: number, memMiB: number) => system.emulator(mips, memMiB),
   };
 }

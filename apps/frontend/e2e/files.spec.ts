@@ -79,3 +79,30 @@ test("the file panel uploads, moves, renames, downloads and deletes guest files"
   await expect(screen).toContainText("listed");
   await expect(screen).toContainText(/drwx.*\/root\/box/);
 });
+
+test("the System tab shows live guest and emulator stats", async ({ page }) => {
+  await page.goto("./?relay=");
+  const screen = page.locator(".xterm-rows");
+  await expect(screen).toContainText("root@bootlet:~#", { timeout: 180_000 });
+  await expect(page.locator("#status-text")).not.toContainText("MIPS"); // moved to the System tab
+
+  await page.locator("#files-toggle").click();
+  await page.getByRole("tab", { name: "System" }).click();
+  const view = page.locator("#sys-view");
+  await expect(view.locator(".sys-meta")).toContainText(/Up .* processes .* load/);
+  const cpu = view.locator('[data-card="CPU"]').locator(".card-value");
+  await expect(cpu).toHaveText(/^\d+%$/);
+  await expect(view.locator('[data-card="Memory"]').locator(".card-value")).toHaveText(/MB of \d+ MB/);
+  await expect(view.locator(".fs-row", { hasText: "Persistent disk" })).toContainText(/of (\d+ MB|1\.0 GB)/); // 1 GiB less the journal
+  await expect(view.locator('[data-card="Emulator"]').locator(".card-value")).toHaveText(/MIPS$/);
+
+  // A busy loop in the guest shows up as CPU use and in the process list.
+  await page.locator(".xterm").click();
+  await page.keyboard.type("timeout 20 sh -c 'while :; do :; done' &\n");
+  await expect(view.locator(".procs tbody tr").first()).toContainText("sh", { timeout: 15_000 });
+  await expect(cpu).toHaveText(/^(9\d|100)%$/, { timeout: 15_000 });
+
+  // The choice of tab is remembered.
+  await page.reload();
+  await expect(page.getByRole("tab", { name: "System" })).toHaveAttribute("aria-selected", "true");
+});
