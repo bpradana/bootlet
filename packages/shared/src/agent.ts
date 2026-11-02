@@ -8,7 +8,7 @@ export const agentChunk = 256 << 10;
 const maxHeader = 8 << 20;
 const maxPayload = 1 << 20;
 
-export type AgentOp = "hello" | "list" | "stat" | "read" | "write" | "mkdir" | "rename" | "copy" | "remove";
+export type AgentOp = "hello" | "list" | "stat" | "read" | "write" | "mkdir" | "rename" | "copy" | "remove" | "stats";
 
 export interface AgentRequest {
   id?: number;
@@ -32,6 +32,26 @@ export interface AgentEntry {
   targetDir?: boolean;
 }
 
+/**
+ * A snapshot of the guest (Go: agent.Stats). CPU, network and process times
+ * are cumulative; rates come from the difference between two snapshots.
+ */
+export interface GuestStats {
+  uptime: number;
+  load: [number, number, number];
+  /** Clock ticks per second of cpu and procs[].ticks. */
+  ticks: number;
+  cpu: { user: number; system: number; iowait: number; idle: number };
+  /** Bytes. */
+  mem: { total: number; free: number; available: number };
+  fs: { mount: string; type: string; total: number; free: number; used: number }[] | null;
+  net?: { rx: number; tx: number };
+  /** Processes and kernel threads. */
+  tasks: number;
+  /** Processes only (kernel threads are skipped). */
+  procs: { pid: number; name: string; ticks: number; rss: number }[];
+}
+
 export interface AgentReply {
   id: number;
   ok: boolean;
@@ -42,6 +62,7 @@ export interface AgentReply {
   entries?: AgentEntry[];
   entry?: AgentEntry;
   eof?: boolean;
+  stats?: GuestStats;
 }
 
 const magic = new TextEncoder().encode(agentMagic);

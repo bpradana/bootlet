@@ -147,7 +147,7 @@ function render() {
       text = "Booting…";
       break;
     case "running":
-      text = !booted ? `Booting… ${mips.toFixed(0)} MIPS` : mips >= 1 ? `Running · ${mips.toFixed(0)} MIPS` : "Running · idle";
+      text = !booted ? "Booting…" : mips >= 1 ? "Running" : "Running · idle";
       break;
     case "stopped":
       text = "Stopped";
@@ -220,6 +220,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case "stats":
       mips = msg.mips;
       emulatorMiB = msg.memMiB;
+      files.emulator(msg.mips, msg.memMiB);
       renderTooltip();
       render();
       break;

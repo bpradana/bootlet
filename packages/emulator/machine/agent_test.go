@@ -112,6 +112,16 @@ func TestAgent(t *testing.T) {
 		t.Errorf("listing of /: %s", got)
 	}
 
+	st := call(agent.Request{Op: "stats"}).Stats
+	if st == nil || st.Mem.Total == 0 || st.CPU.Idle == 0 || len(st.Procs) == 0 || st.Uptime <= 0 {
+		t.Fatalf("stats: %+v", st)
+	}
+	if len(st.FS) == 0 || st.FS[0].Mount != "/" || st.FS[0].Type != "overlay" || st.FS[0].Total < 200<<20 {
+		t.Errorf("filesystems: %+v", st.FS)
+	}
+	t.Logf("stats: %d processes, memory %d/%d MiB, root %d/%d MiB", len(st.Procs),
+		(st.Mem.Total-st.Mem.Available)>>20, st.Mem.Total>>20, st.FS[0].Used>>20, st.FS[0].Total>>20)
+
 	data := make([]byte, 1<<20)
 	rand.Read(data)
 	sum := sha1.Sum(data)

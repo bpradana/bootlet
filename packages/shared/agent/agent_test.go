@@ -174,3 +174,29 @@ func fmtList(s []string) string {
 	}
 	return out + "]"
 }
+
+func TestParseStats(t *testing.T) {
+	cpu := parseCPU([]byte("cpu  100 5 30 800 20 1 2 0 0 0\ncpu0 100 5 30 800 20 1 2 0 0 0\n"))
+	if want := (CPUTimes{User: 105, System: 33, IOWait: 20, Idle: 800}); cpu != want {
+		t.Errorf("cpu %+v, want %+v", cpu, want)
+	}
+	mem := parseMeminfo([]byte("MemTotal:  120000 kB\nMemFree:  30000 kB\nMemAvailable:  70000 kB\nCached: 1 kB\n"))
+	if mem != (Mem{Total: 120000 << 10, Free: 30000 << 10, Available: 70000 << 10}) {
+		t.Errorf("mem %+v", mem)
+	}
+	dev := "Inter-|   Receive  |  Transmit\n face |bytes packets errs drop fifo frame compressed multicast|bytes packets\n" +
+		"    lo:  500 5 0 0 0 0 0 0  500 5 0 0 0 0 0 0\n  eth0: 12345 10 0 0 0 0 0 0 678 9 0 0 0 0 0 0\n"
+	if n := parseNetDev([]byte(dev), "eth0"); n == nil || *n != (Net{RX: 12345, TX: 678}) {
+		t.Errorf("net %+v", n)
+	}
+	if parseNetDev([]byte(dev), "eth1") != nil {
+		t.Error("found a missing interface")
+	}
+	p, flags, err := parseProcStat([]byte("42 (cc1 (x) y) R 1 42 42 0 -1 4194304 1 0 0 0 250 50 0 0 20 0 1 0 100 1000000 300 18446744073709551615"))
+	if err != nil || p.PID != 42 || p.Name != "cc1 (x) y" || p.Ticks != 300 || p.RSS != 300*uint64(os.Getpagesize()) || flags != 4194304 {
+		t.Errorf("proc %+v flags %d %v", p, flags, err)
+	}
+	if _, flags, _ := parseProcStat([]byte("2 (kthreadd) S 0 0 0 0 -1 2129984 0 0 0 0 0 0 0 0 20 0 1 0 1 0 0 18446744073709551615")); flags&pfKthread == 0 {
+		t.Error("kernel thread not recognized")
+	}
+}
