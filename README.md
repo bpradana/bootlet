@@ -53,6 +53,7 @@ Python 3.14.10 on riscv64
 - [The guest](#the-guest)
 - [Networking](#networking)
 - [Persistent storage](#persistent-storage)
+- [File explorer](#file-explorer)
 - [Emulator API](#emulator-api)
 - [Performance](#performance)
 - [Deployment](#deployment)
@@ -70,8 +71,9 @@ Python 3.14.10 on riscv64
 | 📦 **A real package manager** | musl, BusyBox, and `apk` come preinstalled and registered in apk's database, so `apk add` pulls anything from Alpine's riscv64 repositories. |
 | 🌐 **Networking** | virtio-net plus a user-mode TCP/IP stack in Go (like QEMU's slirp). Guest connections travel as [Wisp](https://github.com/MercuryWorkshop/wisp-protocol) streams over a WebSocket to a relay running on your own computer, which also serves the site. |
 | 💾 **Persistent root filesystem** | The whole filesystem is an overlay on a 1 GiB sparse virtio disk, saved to the Origin Private File System (or IndexedDB). Only changed 4 KiB blocks are written. **Reset disk** restores the stock system. |
+| 📂 **File explorer** | A side panel browses the guest's whole filesystem. Drop files or folders from your computer to upload them, drag items onto folders to move them, and drag files out (Chrome, Edge) or double-click to download. |
 | 💤 **Idles at idle** | When the guest executes `wfi`, the worker sleeps until the next timer event, keystroke, or network packet, so a VM at a prompt costs almost no CPU. |
-| 🧩 **No toolchain for the guest** | `guestpack` (pure Go) downloads and verifies pinned Alpine packages and packs the initramfs. No cross compiler, Buildroot, or Docker is needed. |
+| 🧩 **No toolchain for the guest** | `guestpack` (pure Go) downloads and verifies pinned Alpine packages and packs the initramfs. The file explorer's guest agent is cross-compiled by Go itself. No cross compiler, Buildroot, or Docker is needed. |
 | 🖥️ **Native and WASM from one codebase** | The `machine` package drives both `cmd/bootlet` (a terminal runner with direct sockets) and `cmd/wasm` (the browser build). |
 | 🛠️ **One task runner** | [mise](https://mise.jdx.dev) pins Go, Node, pnpm, and zig, and defines every build, test, and dev workflow. |
 
@@ -121,7 +123,7 @@ mise run emu:run      # Ctrl-A x quits; the root filesystem is kept in guest/dis
 
 ```mermaid
 flowchart LR
-    ui["Page<br/>xterm.js · toolbar"] <-->|"postMessage<br/>keystrokes · output · state"| worker
+    ui["Page<br/>xterm.js · toolbar · file panel"] <-->|"postMessage<br/>keystrokes · output · state · agent bytes"| worker
 
     subgraph worker["Web Worker"]
         loop["run loop<br/>12 ms slices · sleeps on wfi"] --> wasm
@@ -130,7 +132,7 @@ flowchart LR
             machine["machine<br/>run · input · reset"] --> cpu["RV64GC hart<br/>Sv39 MMU · TLB"]
             machine --> sbi["SBI firmware"]
             cpu --> bus["MMIO bus"]
-            bus --> devs["UART · PLIC · CLINT · RTC<br/>virtio-blk · virtio-net"]
+            bus --> devs["UART · PLIC · CLINT · RTC<br/>virtio-blk · virtio-net · virtio-console"]
             devs --> stack["netstack<br/>ARP · DNS · TCP"]
         end
         devs -.->|"takeDirty()"| store
@@ -183,15 +185,16 @@ discovers it must fall back to Sv39.
 ```
 packages/emulator/       Go module: the machine, with no frontend dependencies
   cpu/                   hart: decode/execute, CSRs, traps, FPU, RVC table, Sv39 MMU + TLB
-  devices/               UART, PLIC, CLINT, RTC, virtio-mmio transport, virtio-blk/-net, sparse disk + journaled mkfs
+  devices/               UART, PLIC, CLINT, RTC, virtio-mmio transport, virtio-blk/-net/-console, sparse disk + journaled mkfs
   netstack/              user-mode network: ARP, ICMP, fake DNS, TCP termination; direct and Wisp upstreams
   fdt/                   device tree blob encoder
   boot/                  RISC-V Image and ELF loaders
   machine/               memory map, device tree, SBI firmware, run loop: the public API
   cmd/bootlet/           native terminal runner (-net, -relay, -disk)
   cmd/wasm/              exposes the machine to JavaScript as globalThis.bootlet
-packages/shared/         UI ⇄ worker protocol (TypeScript) and the Wisp protocol (Go, wisp/)
-apps/frontend/           Vite + xterm.js page, emulator worker, OPFS/IndexedDB storage, Playwright tests
+packages/shared/         UI ⇄ worker and file agent protocols (TypeScript), the Wisp protocol (Go, wisp/),
+  agent/                 file agent protocol and server (Go); cmd/bootlet-agent is the guest program
+apps/frontend/           Vite + xterm.js page, file panel, emulator worker, OPFS/IndexedDB storage, Playwright tests
 apps/relay/              Wisp relay server (Go) and its Dockerfile
 guest/
   manifest.toml          pinned Alpine packages (sha256), required kernel options, modules
@@ -205,8 +208,10 @@ scripts/                 riscv-tests build (zig cc)
 
 ## The guest
 
-The guest is built from prebuilt **Alpine Linux 3.24 riscv64** packages, so nothing is
-compiled. `mise run guest:fetch` runs `guestpack`, which does the following:
+The guest is built from prebuilt **Alpine Linux 3.24 riscv64** packages. The only program
+compiled for it is `bootlet-agent`, the file explorer's small guest side, which Go
+cross-compiles with no extra toolchain. `mise run guest:fetch` runs `guestpack`, which
+does the following:
 
 1. Downloads the kernel (`linux-lts`) and the userland (`busybox-static`, `musl`,
    `apk-tools-static`, `alpine-keys`, `ca-certificates-bundle`), and checks each against
@@ -219,10 +224,11 @@ compiled. `mise run guest:fetch` runs `guestpack`, which does the following:
    knows musl and friends are already present.
 5. Reads BusyBox's applet table out of the binary, so every applet link is created
    at pack time instead of running `busybox --install` at every boot.
-6. Adds the virtio, ext4, and overlay modules with their dependencies, resolved from
+6. Adds the virtio (block, net, console), ext4, and overlay modules with their dependencies, resolved from
    `modules.dep`. It decompresses them and strips their signatures, because verifying a
    signature costs the guest a SHA-256 and an RSA check at emulated speed.
-7. Writes a newc initramfs (8.6 MB, 4.4 MB gzip) with the `guest/rootfs` files on top.
+7. Builds `bootlet-agent` (`GOOS=linux GOARCH=riscv64`, 2.4 MB) into `/sbin`.
+8. Writes a newc initramfs (11 MB, 5.5 MB gzip) with the `guest/rootfs` files on top.
 
 The default kernel command line shows the boot log from the first instruction
 (`earlycon=sbi`; `?quiet` appends `quiet loglevel=3`) and skips boot work that is wasted
@@ -346,6 +352,35 @@ heavy file churn.
 Hover the status indicator to see which backend is in use. The native runner keeps the
 same disk format in a sparse file (`-disk guest/disk.img`).
 
+## File explorer
+
+<div align="center">
+<img src="docs/assets/files.png" alt="The file panel beside the terminal, showing /root with a folder, a symlink and files with their sizes and modification times" width="100%">
+</div>
+
+**Files** in the toolbar opens a panel next to the terminal. It browses the guest's
+whole filesystem:
+
+- **Upload:** drop files or folders from your computer onto the panel (or onto a folder
+  in it), or use the upload button. Each file is written to `name.bootlet-part` and
+  renamed into place when complete, so an interrupted upload never looks finished. If a
+  name is taken, you choose Replace, Keep both, or Skip.
+- **Move and copy:** drag items onto a folder or onto a part of the path. Hold Alt/Option
+  to copy instead.
+- **Download:** double-click a file, or use Download in its menu. In Chrome and Edge you
+  can also drag a file of up to 8 MB onto your desktop. The panel fetches it when you
+  hover over it.
+- **Everything else:** right-click for rename (F2), delete (Delete), copy path, and
+  "insert path in terminal". Dragging an item onto the terminal also types its path.
+  Backspace goes up a folder.
+
+The guest side is `bootlet-agent`, a small Go program that init starts and restarts. It
+talks to the page over a virtio console port (`/dev/vport0p0`, named `bootlet.agent`) in
+a framed protocol: a JSON header plus raw bytes (`packages/shared/agent`). The worker
+only relays bytes. Files move in 256 KiB chunks at about 4.5 MB/s up and 10 MB/s down
+natively, and a few times slower in the browser. Panel width changes the terminal
+width, so run `resize` afterwards.
+
 ## Emulator API
 
 The `machine` package is the whole public surface. The browser build exposes the same
@@ -380,6 +415,7 @@ for {
 | `loadKernel(Uint8Array)`, `loadInitrd(Uint8Array)` | `LoadKernel`, `LoadInitrd` |
 | `attachDisk(sizeMiB, idx, data)`, `takeDirty()`, `resetDisk(sizeMiB)` | `AttachDisk`, `Disk.Restore`, `Disk.TakeDirty`, `ReplaceDisk` |
 | `attachNet()`, `netInput(packet)`, `netOutput()`, `netDisconnected()` | `AttachNet` with a `netstack.WispUpstream` |
+| `attachAgent()`, `agentInput(Uint8Array)`, `agentOutput()` | `AttachAgent`, `AgentInput`, `AgentOutput` |
 | `reset()` | `Reset` |
 | `run(budgetMs)` → `{output, halted, idle, idleMs, instructions}` | `Run` + `Output` |
 | `input(Uint8Array)` | `Input` |
@@ -394,6 +430,7 @@ The physical memory map follows QEMU's `virt` machine:
 | `0x1000_0000` | 16550A UART, IRQ 10 |
 | `0x1000_1000` | virtio-mmio block device, IRQ 1 (when a disk is attached) |
 | `0x1000_2000` | virtio-mmio network device, IRQ 2 (when networking is attached) |
+| `0x1000_3000` | virtio-mmio console for the file agent, IRQ 3 (when the agent is attached) |
 | `0x8000_0000` | RAM (128 MiB by default, `?mem=256` in the page) |
 
 ## Performance

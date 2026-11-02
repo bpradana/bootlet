@@ -1,5 +1,6 @@
 # Pinned Alpine Linux riscv64 packages that make up the guest. Nothing here is compiled:
-# guestpack downloads these, verifies them, and packs a kernel Image + initramfs.
+# guestpack downloads these, verifies them, and packs a kernel Image + initramfs (plus
+# bootlet-agent, the file explorer's small guest program, cross-compiled from this repo).
 mirror = "https://dl-cdn.alpinelinux.org/alpine/v3.24"
 
 # Installed as /bin/busybox, with a link per applet in /bin.
@@ -16,14 +17,15 @@ required = [
   "BLK_DEV_INITRD", "DEVTMPFS", "TMPFS", "BINFMT_ELF",
 ]
 # Loadable modules copied into the initramfs (paths below lib/modules/<version>/),
-# with their dependencies: the persistent root disk (virtio-blk, ext4, overlay)
-# and networking (virtio-net).
+# with their dependencies: the persistent root disk (virtio-blk, ext4, overlay),
+# networking (virtio-net) and the file explorer's port (virtio-console).
 modules = [
   "kernel/drivers/virtio/virtio_mmio.ko.gz",
   "kernel/drivers/block/virtio_blk.ko.gz",
   "kernel/fs/ext4/ext4.ko.gz",
   "kernel/fs/overlayfs/overlay.ko.gz",
   "kernel/drivers/net/virtio_net.ko.gz",
+  "kernel/drivers/char/virtio_console.ko.gz",
 ]
 
 # Userland. Every package is unpacked into the initramfs and recorded in apk's

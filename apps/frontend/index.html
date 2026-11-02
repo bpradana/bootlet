@@ -20,12 +20,67 @@
           <span class="dot"></span><span id="status-text">Starting…</span>
         </span>
         <button class="net" id="net" type="button" data-state="off" aria-haspopup="dialog">Network off</button>
+        <button class="files-btn" id="files-toggle" type="button" aria-pressed="false" aria-controls="files" title="Browse the guest's files (drag and drop to upload)">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
+          Files
+        </button>
         <button id="toggle" type="button" disabled>Stop</button>
         <button id="restart" type="button" disabled>Restart</button>
         <button id="reset-disk" type="button" disabled>Reset disk</button>
       </div>
     </header>
-    <main id="terminal" aria-label="Serial console"></main>
+    <div class="workspace">
+      <main id="terminal" aria-label="Serial console"></main>
+      <div class="splitter" id="files-splitter" role="separator" aria-orientation="vertical" aria-label="Resize file panel" tabindex="0" hidden></div>
+      <aside class="files" id="files" aria-label="Files" hidden>
+        <header class="files-head">
+          <div class="files-bar">
+            <h2>Files</h2>
+            <button type="button" class="tool" id="files-up" title="Parent folder (Backspace)" aria-label="Parent folder">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5M5.5 11.5L12 5l6.5 6.5" /></svg>
+            </button>
+            <button type="button" class="tool" id="files-home" title="Home folder" aria-label="Home folder">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 11L12 4l8.5 7M6 9.5V20h12V9.5" /></svg>
+            </button>
+            <button type="button" class="tool" id="files-refresh" title="Refresh" aria-label="Refresh">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 12a7.5 7.5 0 11-2.2-5.3M19.5 4.5v4.5H15" /></svg>
+            </button>
+            <button type="button" class="tool" id="files-mkdir" title="New folder" aria-label="New folder">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2zM12 10v6M9 13h6" /></svg>
+            </button>
+            <button type="button" class="tool" id="files-upload" title="Upload files" aria-label="Upload files">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 16V4m0 0L7.5 8.5M12 4l4.5 4.5M5 20h14" /></svg>
+            </button>
+            <button type="button" class="tool" id="files-close" title="Close" aria-label="Close files">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" /></svg>
+            </button>
+          </div>
+          <nav class="crumbs" id="files-crumbs" aria-label="Folder path"></nav>
+        </header>
+        <div class="files-cols" aria-hidden="true"><span></span><span>Name</span><span>Size</span><span>Modified</span></div>
+        <div class="files-list" id="files-list" role="listbox" aria-label="Folder contents" aria-multiselectable="true" tabindex="0"></div>
+        <p class="files-msg" id="files-msg" hidden></p>
+        <div class="files-drop" id="files-drop" hidden><span id="files-drop-text"></span></div>
+        <ul class="transfers" id="files-transfers" aria-label="Transfers" hidden></ul>
+        <p class="files-hint" id="files-hint">Drop files here to upload. Drag items onto a folder to move them (hold Alt/Option to copy).</p>
+        <input type="file" id="files-input" multiple hidden />
+      </aside>
+    </div>
+    <div class="menu" id="files-menu" role="menu" hidden></div>
+    <dialog id="files-conflict" class="net-dialog conflict-dialog" aria-labelledby="conflict-title">
+      <form method="dialog">
+        <div class="conflict-body">
+          <h2 id="conflict-title">Replace?</h2>
+          <p id="conflict-text"></p>
+          <label class="conflict-all" id="conflict-all-row"><input type="checkbox" id="conflict-all" /> Do this for the remaining items</label>
+        </div>
+        <footer class="dlg-foot">
+          <button class="btn" value="skip">Skip</button>
+          <button class="btn" value="keep">Keep both</button>
+          <button class="btn btn-primary" value="replace">Replace</button>
+        </footer>
+      </form>
+    </dialog>
     <dialog id="net-dialog" class="net-dialog" aria-labelledby="net-title">
       <form method="dialog">
         <header class="dlg-head">

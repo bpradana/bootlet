@@ -42,6 +42,9 @@ func main() {
 	api.Set("netOutput", js.FuncOf(netOutput))
 	api.Set("netConnecting", js.FuncOf(netConnecting))
 	api.Set("netDisconnected", js.FuncOf(netDisconnected))
+	api.Set("attachAgent", js.FuncOf(attachAgent))
+	api.Set("agentInput", js.FuncOf(agentInput))
+	api.Set("agentOutput", js.FuncOf(agentOutput))
 	js.Global().Set("bootlet", api)
 	select {}
 }
@@ -258,4 +261,29 @@ func netConnecting(js.Value, []js.Value) any {
 func netDisconnected(js.Value, []js.Value) any {
 	wisp.Disconnected()
 	return nil
+}
+
+// attachAgent() adds the console port of the guest's file agent, which
+// serves the file explorer. Call before reset().
+func attachAgent(js.Value, []js.Value) any {
+	m.AttachAgent()
+	return nil
+}
+
+// agentInput(data: Uint8Array) sends bytes to the file agent.
+func agentInput(_ js.Value, args []js.Value) any {
+	m.AgentInput(bytesFrom(args[0]))
+	return nil
+}
+
+// agentOutput(): Uint8Array | null returns the bytes the file agent sent
+// since the last call.
+func agentOutput(js.Value, []js.Value) any {
+	out := m.AgentOutput()
+	if len(out) == 0 {
+		return nil
+	}
+	arr := js.Global().Get("Uint8Array").New(len(out))
+	js.CopyBytesToJS(arr, out)
+	return arr
 }

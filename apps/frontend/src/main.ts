@@ -3,6 +3,7 @@ import "./style.css";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { shellPrompt, type FromWorker, type NetState, type ToWorker, type VMState } from "@bootlet/shared";
+import { initFiles, pathsType, shellQuote } from "./files";
 
 const statusEl = document.getElementById("status")!;
 const statusText = document.getElementById("status-text")!;
@@ -82,6 +83,39 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 term.onData((s) => send({ type: "input", data: encoder.encode(s) }));
 
+// File explorer: requests to the guest's file agent travel through the worker.
+const files = initFiles({
+  send: (data) => worker.postMessage({ type: "agent", data } satisfies ToWorker, [data.buffer]),
+  type: (text) => {
+    send({ type: "input", data: encoder.encode(text) });
+    term.focus();
+  },
+});
+let filesVM = "";
+
+// Guest paths dragged from the file panel onto the terminal are typed there.
+const terminalEl = document.getElementById("terminal")!;
+terminalEl.addEventListener("dragover", (e) => {
+  if (e.dataTransfer?.types.includes(pathsType)) {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "copy";
+  }
+});
+terminalEl.addEventListener("drop", (e) => {
+  const paths = e.dataTransfer?.getData(pathsType);
+  if (!paths) return;
+  e.preventDefault();
+  send({ type: "input", data: encoder.encode((JSON.parse(paths) as string[]).map(shellQuote).join(" ") + " ") });
+  term.focus();
+});
+// A file dropped anywhere else would make the browser open it, replacing the
+// page (and the running machine).
+for (const type of ["dragover", "drop"] as const) {
+  window.addEventListener(type, (e) => {
+    if (e.dataTransfer?.types.includes("Files")) e.preventDefault();
+  });
+}
+
 let state: VMState = "loading";
 let booted = false; // shell prompt seen since the last (re)boot
 let mips = 0;
@@ -130,6 +164,11 @@ function render() {
   toggleBtn.textContent = state === "stopped" || state === "halted" ? "Start" : "Stop";
   restartBtn.disabled = state === "loading" || state === "error";
   resetDiskBtn.disabled = restartBtn.disabled || !persistent;
+  const vm = `${state}:${booted}`;
+  if (vm !== filesVM) {
+    filesVM = vm;
+    files.vmState(state, booted);
+  }
 }
 
 const mb = (n: number) => (n / 1048576).toFixed(1);
@@ -174,6 +213,9 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       netEl.title = msg.state === "off" ? "Set up networking" : `Relay: ${relay}`;
       if (msg.state === "online" && !servedByRelay) remembered.set(relay);
       renderNetDialog();
+      break;
+    case "agent":
+      files.client.feed(msg.data);
       break;
     case "stats":
       mips = msg.mips;

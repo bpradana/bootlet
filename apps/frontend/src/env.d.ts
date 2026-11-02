@@ -36,6 +36,10 @@ interface BootletAPI {
   netOutput(): Uint8Array<ArrayBuffer>[];
   netConnecting(): void;
   netDisconnected(): void;
+  /** The file agent's console port: bytes in both directions. */
+  attachAgent(): void;
+  agentInput(data: Uint8Array): void;
+  agentOutput(): Uint8Array<ArrayBuffer> | null;
 }
 
 interface ImportMetaEnv {

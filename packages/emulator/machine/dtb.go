@@ -102,5 +102,13 @@ func (m *Machine) deviceTree(initrdStart, initrdEnd uint64) []byte {
 			Add("interrupts", fdt.U32(NetIRQ))
 	}
 
+	if m.Agent != nil {
+		soc.Child("virtio_mmio@10003000").
+			Add("compatible", fdt.Str("virtio,mmio")).
+			Add("reg", fdt.U64(AgentBase, 0x1000)).
+			Add("interrupt-parent", fdt.U32(phandlePLIC)).
+			Add("interrupts", fdt.U32(AgentIRQ))
+	}
+
 	return fdt.Encode(root, 0)
 }
