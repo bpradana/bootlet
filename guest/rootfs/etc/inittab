@@ -1,5 +1,6 @@
 ::sysinit:/etc/init.d/rcS
 ttyS0::respawn:-/bin/sh
+::respawn:/sbin/bootlet-agent
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/etc/init.d/rcK
 ::shutdown:/bin/sh -c "umount -a -r 2>/dev/null"

@@ -41,6 +41,10 @@ if [ -e /sys/class/net/eth0 ]; then
 fi
 
 step "Started Periodic Command Scheduler (crond)." crond -c /var/spool/cron/crontabs
+# init starts the agent (and restarts it) once this script ends; see inittab.
+if grep -qs bootlet.agent /sys/class/virtio-ports/*/name; then
+  ok "Started File Explorer Service (bootlet-agent)."
+fi
 ok "Reached target Multi-User System."
 ok "Started Serial Getty on ttyS0."
 

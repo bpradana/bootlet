@@ -3,7 +3,8 @@
 // incoming messages, and while the guest idles (wfi) it sleeps until the next
 // timer event, keystroke or network packet. The guest always has a network
 // device; while a relay is connected, its TCP connections travel as Wisp
-// packets over a WebSocket, and the relay can change at any time.
+// packets over a WebSocket, and the relay can change at any time. Bytes for
+// the guest's file agent (the file explorer) pass through unchanged.
 import "./vendor/wasm_exec.js";
 import { assets, type FromWorker, type ToWorker } from "@bootlet/shared";
 import { openStore, type BlockStore } from "./storage";
@@ -96,6 +97,7 @@ async function boot() {
     post({ type: "storage", backend: "none", detail: d.error });
   }
   api.attachNet();
+  api.attachAgent();
   setRelay(relayURL);
   check(api.reset());
   post({ type: "state", state: "booting" });
@@ -195,6 +197,8 @@ function slice() {
   const r = api.run(SLICE_MS);
   if (r.output.length > 0) post({ type: "output", data: r.output }, [r.output.buffer]);
   flushNet();
+  const agent = api.agentOutput();
+  if (agent) post({ type: "agent", data: agent }, [agent.buffer]);
   instructions += r.instructions;
   const now = performance.now();
   if (now - statsSince > 1000) {
@@ -284,6 +288,10 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       break;
     case "input":
       api?.input(msg.data);
+      wake();
+      break;
+    case "agent":
+      api?.agentInput(msg.data);
       wake();
       break;
   }

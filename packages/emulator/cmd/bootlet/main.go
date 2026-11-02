@@ -76,6 +76,7 @@ func main() {
 		m.AttachNet(netstack.New(up))
 		netWake = up.Notify
 	}
+	m.AttachAgent() // unused here, but the guest's file agent expects its port
 	if err := m.Reset(); err != nil {
 		log.Fatal(err)
 	}

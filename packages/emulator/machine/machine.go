@@ -25,6 +25,8 @@ const (
 	DiskIRQ   = 1
 	NetBase   = 0x1000_2000
 	NetIRQ    = 2
+	AgentBase = 0x1000_3000
+	AgentIRQ  = 3
 	RTCBase   = 0x0010_1000
 
 	// TimebaseHz is the frequency of the time CSR.
@@ -63,8 +65,9 @@ type Machine struct {
 	UART  *devices.UART
 	PLIC  *devices.PLIC
 	CLINT *devices.CLINT
-	Disk  *devices.VirtioBlock // nil unless AttachDisk was called
-	Net   *devices.VirtioNet   // nil unless AttachNet was called
+	Disk  *devices.VirtioBlock   // nil unless AttachDisk was called
+	Net   *devices.VirtioNet     // nil unless AttachNet was called
+	Agent *devices.VirtioConsole // nil unless AttachAgent was called
 	stack *netstack.Stack
 	bus   devices.Bus
 
@@ -144,6 +147,26 @@ func (m *Machine) AttachNet(s *netstack.Stack) {
 	m.bus.Map(NetBase, 0x1000, m.Net)
 }
 
+// AgentPort is the name of the guest's file agent port.
+const AgentPort = "bootlet.agent"
+
+// AttachAgent adds the virtio console port that the guest's file agent
+// (bootlet-agent) talks over. Call it before Reset.
+func (m *Machine) AttachAgent() {
+	m.Agent = devices.NewVirtioConsole(AgentPort, m.RAM, RAMBase)
+	m.Agent.IRQ = func(level bool) { m.PLIC.SetLevel(AgentIRQ, level) }
+	m.bus.Map(AgentBase, 0x1000, m.Agent)
+}
+
+// AgentInput sends bytes to the guest's file agent.
+func (m *Machine) AgentInput(b []byte) {
+	m.Agent.Deliver(b)
+	m.CPU.WFI = false
+}
+
+// AgentOutput returns and clears the bytes the file agent sent.
+func (m *Machine) AgentOutput() []byte { return m.Agent.Output() }
+
 // pollNet moves upstream events (data, closes) into the guest; delivering
 // frames raises the device interrupt, which wakes a hart waiting in wfi.
 func (m *Machine) pollNet() {
@@ -196,6 +219,9 @@ func (m *Machine) Reset() error {
 	if m.Net != nil {
 		m.Net.Reset()
 		m.stack.Reset()
+	}
+	if m.Agent != nil {
+		m.Agent.Reset()
 	}
 	m.start = time.Now()
 	m.sbiTimer = ^uint64(0)

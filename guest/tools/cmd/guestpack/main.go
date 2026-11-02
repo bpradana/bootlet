@@ -2,7 +2,9 @@
 // it downloads and verifies the pinned apks, extracts the kernel Image, checks
 // that the kernel config has everything the emulator relies on, and packs an
 // initramfs with BusyBox, musl and apk, registered in apk's database so
-// `apk add` works in the guest. It needs no cross compiler and runs on any
+// `apk add` works in the guest. The one program built from this repository
+// is bootlet-agent, the guest side of the file explorer, which Go
+// cross-compiles for riscv64 with no extra toolchain; guestpack runs on any
 // host.
 package main
 
@@ -18,6 +20,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -49,6 +52,7 @@ func main() {
 	rootfsDir := flag.String("rootfs", "guest/rootfs", "rootfs overlay directory")
 	cacheDir := flag.String("cache", "guest/.cache", "download cache")
 	outDir := flag.String("out", "guest/out", "output directory")
+	agentPkg := flag.String("agent", "./packages/shared/agent/cmd/bootlet-agent", "Go package of the guest file agent, installed as /sbin/bootlet-agent")
 	flag.Parse()
 	log.SetFlags(0)
 	log.SetPrefix("guestpack: ")
@@ -76,7 +80,8 @@ func main() {
 		pkgs = append(pkgs, pkg)
 	}
 
-	initrd := buildInitrd(pkgs, m.Busybox, *rootfsDir, kfiles, m.Kernel.Modules)
+	agent := buildAgent(*agentPkg, *outDir)
+	initrd := buildInitrd(pkgs, m.Busybox, *rootfsDir, kfiles, m.Kernel.Modules, agent)
 
 	write(filepath.Join(*outDir, "Image"), image)
 	write(filepath.Join(*outDir, "initrd.cpio"), initrd)
@@ -108,6 +113,19 @@ func fetch(mirror, pkg, want, cacheDir string) []byte {
 	}
 	must(os.WriteFile(cached, data, 0o644))
 	return data
+}
+
+// buildAgent cross-compiles the guest file agent: a static riscv64 binary
+// for RV64GC (Go's default GORISCV64=rva20u64).
+func buildAgent(pkg, outDir string) []byte {
+	out := filepath.Join(outDir, "bootlet-agent")
+	cmd := exec.Command("go", "build", "-trimpath", "-ldflags=-s -w", "-o", out, pkg)
+	cmd.Env = append(os.Environ(), "GOOS=linux", "GOARCH=riscv64", "GORISCV64=rva20u64", "CGO_ENABLED=0")
+	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
+	if err := cmd.Run(); err != nil {
+		log.Fatalf("building %s: %v", pkg, err)
+	}
+	return must2(os.ReadFile(out))
 }
 
 // kernelImage normalizes the packaged kernel to a raw RISC-V Image so the
@@ -186,7 +204,7 @@ func (t *tree) Symlink(name, target string) {
 	must(t.w.Symlink(name, target))
 }
 
-func buildInitrd(pkgs []*apk.Package, busyboxPath, rootfsDir string, kfiles map[string]apk.File, modules []string) []byte {
+func buildInitrd(pkgs []*apk.Package, busyboxPath, rootfsDir string, kfiles map[string]apk.File, modules []string, agent []byte) []byte {
 	var buf bytes.Buffer
 	t := &tree{w: cpio.NewWriter(&buf), dirs: map[string]bool{}}
 	for _, d := range []string{"bin", "sbin", "usr/bin", "usr/sbin", "lib/modules", "dev", "etc", "proc", "sys",
@@ -233,6 +251,7 @@ func buildInitrd(pkgs []*apk.Package, busyboxPath, rootfsDir string, kfiles map[
 		}
 	}
 	t.Symlink("sbin/init", "../bin/busybox")
+	t.File("sbin/bootlet-agent", 0o755, agent)
 
 	if len(modules) > 0 {
 		order := resolveModules(kfiles, modules)
