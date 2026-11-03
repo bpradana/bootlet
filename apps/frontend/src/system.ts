@@ -206,6 +206,7 @@ export function initSystem(client: AgentClient, root: HTMLElement, visible: () =
   const emuRows = el("dl", "kv");
   const emuActive = el("dd");
   const emuFps = el("dd");
+  const emuEngine = el("dd");
   const emuMem = el("dd");
   const emuStore = el("dd", "", "—");
   emuRows.append(
@@ -213,6 +214,8 @@ export function initSystem(client: AgentClient, root: HTMLElement, visible: () =
     emuActive,
     el("dt", "", "Display"),
     emuFps,
+    el("dt", "", "Engine"),
+    emuEngine,
     el("dt", "", "Tab memory"),
     emuMem,
     el("dt", "", "Browser storage"),
@@ -355,12 +358,20 @@ export function initSystem(client: AgentClient, root: HTMLElement, visible: () =
 
   return {
     update,
-    emulator({ mips, activeMips, fps, memMiB }) {
+    emulator({ mips, activeMips, fps, memMiB, engine }) {
       const fmt = (v: number) => (v < 10 ? v.toFixed(1) : String(Math.round(v)));
       emuSpark.push([mips]);
       emu.value.textContent = `${fmt(mips)} MIPS`;
       emuActive.textContent = activeMips > 0 ? `${fmt(activeMips)} MIPS` : "idle";
       emuFps.textContent = `${fmt(fps)} frames/s`;
+      emuEngine.textContent =
+        engine.engine === "jit"
+          ? `WebAssembly JIT · ${engine.compiled.toLocaleString()} blocks compiled`
+          : engine.engine === "blocks"
+            ? "Decoded-block cache"
+            : "Interpreter";
+      emuEngine.title =
+        engine.engine === "jit" ? `${engine.codeKiB.toLocaleString()} KiB generated in ${Math.round(engine.compileMs)} ms` : "";
       emuMem.textContent = `${memMiB} MiB`;
       if (visible()) void estimate();
     },

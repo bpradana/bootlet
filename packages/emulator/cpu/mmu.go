@@ -21,7 +21,7 @@ const (
 )
 
 const (
-	tlbSize = 256
+	tlbSize = 1024
 	noTag   = ^uint64(0)
 )
 
@@ -34,11 +34,23 @@ type tlbEntry struct {
 	flags uint8
 }
 
+// flushTLB empties both TLBs. Address space switches flush them often, so
+// it clears only the slots filled since the last flush (tlbFilled), unless
+// there were too many to track.
 func (c *CPU) flushTLB() {
-	for i := range c.itlb {
-		c.itlb[i].tag = noTag
-		c.dtlb[i].tag = noTag
+	if c.tlbOverflow {
+		for i := range c.itlb {
+			c.itlb[i].tag = noTag
+			c.dtlb[i].tag = noTag
+		}
+	} else {
+		for _, f := range c.tlbFilled {
+			c.itlb[f&(tlbSize-1)].tag = noTag
+			c.dtlb[f&(tlbSize-1)].tag = noTag
+		}
 	}
+	c.tlbFilled = c.tlbFilled[:0]
+	c.tlbOverflow = false
 	c.fetchTag = noTag
 }
 
@@ -90,6 +102,11 @@ func (c *CPU) translate(va uint64, acc access) (uint64, bool) {
 		return 0, false
 	}
 	*e = tlbEntry{tag: vpn, page: page, flags: flags}
+	if len(c.tlbFilled) < cap(c.tlbFilled) {
+		c.tlbFilled = append(c.tlbFilled, uint16(vpn%tlbSize))
+	} else {
+		c.tlbOverflow = true
+	}
 	return page | va&0xfff, true
 }
 
@@ -129,7 +146,9 @@ func (c *CPU) walk(va uint64, acc access, priv uint8) (page uint64, flags uint8,
 		}
 		if upd != pte {
 			binary.LittleEndian.PutUint64(c.RAM[off:], upd)
-			c.codeStore(off)
+			if c.blocks != nil {
+				c.codeStore(off)
+			}
 		}
 		return (ppn | (va>>12)&mask) << 12, uint8(upd), true
 	}
@@ -283,7 +302,9 @@ func (c *CPU) storeSlow(va uint64, size int, v uint64) bool {
 		var b [8]byte
 		binary.LittleEndian.PutUint64(b[:], v)
 		copy(c.RAM[off:], b[:size])
-		c.codeStore(off)
+		if c.blocks != nil {
+			c.codeStore(off)
+		}
 		return true
 	}
 	if !c.Bus.Write(pa, size, v) {

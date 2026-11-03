@@ -19,9 +19,12 @@ sources = ["guest/manifest.toml", "guest/rootfs/**/*", "guest/tools/**/*.go", "p
 outputs = ["guest/out/Image", "guest/out/initrd.cpio"]
 
 [tasks."emu:test"]
-description = "Go unit tests (emulator, network stack, relay, guest tools) and the official riscv-tests"
+description = "Go unit tests (emulator, network stack, relay, guest tools) and the official riscv-tests, plus the CPU tests on WebAssembly under Node, where the JIT runs"
 depends = ["emu:riscv-tests"]
-run = ["go test ./packages/emulator/... ./packages/shared/... ./apps/relay/... ./guest/tools/..."]
+run = [
+  "go test ./packages/emulator/... ./packages/shared/... ./apps/relay/... ./guest/tools/...",
+  "cd packages/emulator && GOOS=js GOARCH=wasm go test -exec \"$PWD/../../scripts/go_js_wasm_exec_jit\" ./cpu",
+]
 
 [tasks."emu:riscv-tests"]
 description = "Clone and build the official riscv-tests ELFs with zig cc"
@@ -70,7 +73,11 @@ run = "docker build -f apps/relay/Dockerfile -t bootlet-relay ."
 description = "Boot the guest natively and run shell commands against it"
 depends = ["guest:fetch"]
 dir = "packages/emulator"
-run = "go test -tags boot -run 'TestBoot|TestCrashConsistency|TestAgent|TestDisplay|TestKeyboard|TestSplash|TestDeterministic' -v -timeout 30m ./machine"
+run = [
+  "go test -tags boot -run 'TestBoot|TestCrashConsistency|TestAgent|TestDisplay|TestKeyboard|TestSplash|TestDeterministic' -v -timeout 30m ./machine",
+  # Again on WebAssembly under Node: compares the JIT with the interpreter over a Linux boot.
+  "GOOS=js GOARCH=wasm go test -exec \"$PWD/../../scripts/go_js_wasm_exec_jit\" -tags boot -run TestDeterministic -v -timeout 30m ./machine",
+]
 
 [tasks."wasm:build"]
 description = "Compile the emulator to WebAssembly for the frontend"
@@ -124,7 +131,7 @@ depends = ["setup"]
 run = [
   "test -z \"$(gofmt -l packages apps guest)\" || (gofmt -l packages apps guest && exit 1)",
   "go vet ./packages/emulator/... ./packages/shared/... ./apps/relay/... ./guest/tools/... && go vet -tags boot ./packages/emulator/machine",
-  "cd packages/emulator && GOOS=js GOARCH=wasm go vet ./cmd/wasm",
+  "cd packages/emulator && GOOS=js GOARCH=wasm go vet ./cmd/wasm ./cpu && GOOS=js GOARCH=wasm go vet -tags boot ./machine",
   "pnpm -r typecheck",
 ]
 

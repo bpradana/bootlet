@@ -11,10 +11,17 @@ import (
 	"syscall/js"
 	"time"
 
+	"bootlet/emulator/cpu"
 	"bootlet/emulator/devices"
 	"bootlet/emulator/machine"
 	"bootlet/emulator/netstack"
 )
+
+// jitRun calls the JIT's dispatcher directly; the worker provides it (see
+// cpu.SetJITRun).
+//
+//go:wasmimport bootlet jit_run
+func jitRun() int32
 
 var (
 	m    *machine.Machine
@@ -25,6 +32,7 @@ var (
 func main() {
 	// Wasm memory never shrinks, so keep the heap close to its live size.
 	debug.SetGCPercent(50)
+	cpu.SetJITRun(jitRun)
 	api := js.Global().Get("Object").New()
 	api.Set("create", js.FuncOf(create))
 	api.Set("loadKernel", js.FuncOf(loadKernel))
@@ -48,6 +56,7 @@ func main() {
 	api.Set("displayFlush", js.FuncOf(displayFlush))
 	api.Set("displayInvalidate", js.FuncOf(displayInvalidate))
 	api.Set("keyEvent", js.FuncOf(keyEvent))
+	api.Set("engineStats", js.FuncOf(engineStats))
 	js.Global().Set("bootlet", api)
 	select {}
 }
@@ -86,6 +95,9 @@ func create(_ js.Value, args []js.Value) any {
 		if e := args[3].Get("engine"); e.Truthy() {
 			cfg.Engine = e.String()
 		}
+	}
+	if cfg.Engine == "" {
+		cfg.Engine = machine.EngineJIT // falls back to the block cache without a host
 	}
 	m = machine.New(cfg)
 	if cfg.Display {
@@ -342,4 +354,26 @@ func keyEvent(_ js.Value, args []js.Value) any {
 		m.KeyEvent(uint16(args[0].Int()), args[1].Bool())
 	}
 	return nil
+}
+
+// engineStats(): {engine, compiled, codeKiB, compileMs, entries} describes
+// how guest code runs: "interp", "blocks" or "jit" (with its counters).
+func engineStats(js.Value, []js.Value) any {
+	if m == nil {
+		return nil
+	}
+	engine := "interp"
+	if m.CPU.JITActive() {
+		engine = "jit"
+	} else if built, _, _, _ := m.CPU.BlockStats(); built > 0 {
+		engine = "blocks"
+	}
+	s := m.CPU.JITStats()
+	return map[string]any{
+		"engine":    engine,
+		"compiled":  float64(s.Compiled),
+		"codeKiB":   float64(s.CodeBytes >> 10),
+		"compileMs": float64(s.CompileTime.Microseconds()) / 1000,
+		"entries":   float64(s.Entries),
+	}
 }

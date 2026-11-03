@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Runs a GOOS=js GOARCH=wasm test binary under Node, like Go's own
+# go_js_wasm_exec, but exposes the binary's WebAssembly memory as
+# globalThis.bootletWasmMemory so the emulator's JIT can share it (as the
+# browser worker does). Use: go test -exec "$PWD/scripts/go_js_wasm_exec_jit"
+set -euo pipefail
+export BOOTLET_GOROOT="$(go env GOROOT)"
+exec node --stack-size=8192 "$(dirname "$0")/wasm_exec_node_jit.cjs" "$@"
