@@ -7,15 +7,7 @@ export default defineConfig({
   timeout: 240_000,
   // CI runs this alongside the Go tests on a small runner; give the guest room.
   expect: { timeout: 30_000 },
-  use: {
-    baseURL: "http://localhost:4174/bootlet/",
-    ...devices["Desktop Chrome"],
-    // Full Chromium in its new headless mode: the default headless shell
-    // loses WebGPU devices on canvases transferred to a worker. WebGPU needs
-    // the flag headless; without a GPU (CI) it uses SwiftShader.
-    channel: "chromium",
-    launchOptions: { args: ["--enable-unsafe-webgpu", "--enable-unsafe-swiftshader"] },
-  },
+  use: { baseURL: "http://localhost:4174/bootlet/", ...devices["Desktop Chrome"] },
   webServer: [
     {
       command: "pnpm exec vite preview --port 4174 --strictPort --base /bootlet/",
