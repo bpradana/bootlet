@@ -16,6 +16,7 @@ import (
 // drew last. The first pixel the guest changes (simpledrm/fbcon taking over
 // the display) ends it for good, so it never covers guest output.
 type Splash struct {
+	d                     *Display
 	fb                    []byte
 	width, height, stride int
 	img                   []byte // what the splash last drew
@@ -38,11 +39,12 @@ const (
 // NewSplash draws the splash on d. info is the machine summary line, e.g.
 // "RV64GC  128 MIB RAM  640X480 DISPLAY".
 func NewSplash(d *Display, info string) *Splash {
-	s := &Splash{fb: d.fb, width: d.Width, height: d.Height, stride: d.Stride, info: info}
+	s := &Splash{d: d, fb: d.fb, width: d.Width, height: d.Height, stride: d.Stride, info: info}
 	s.img = make([]byte, len(s.fb))
 	s.drawStatic()
 	s.drawDynamic(0)
 	copy(s.fb, s.img)
+	s.d.Damage()
 	return s
 }
 
@@ -62,6 +64,7 @@ func (s *Splash) Tick(elapsed time.Duration) bool {
 	s.frame++
 	s.drawDynamic(elapsed)
 	copy(s.fb, s.img)
+	s.d.Damage()
 	return true
 }
 

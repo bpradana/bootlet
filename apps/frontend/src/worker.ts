@@ -7,6 +7,7 @@
 // the guest's file agent (the file explorer) pass through unchanged.
 import "./vendor/wasm_exec.js";
 import { assets, display, type FromWorker, type ToWorker } from "@bootlet/shared";
+import { createRenderer, type Renderer } from "./renderer";
 import { openStore, type BlockStore } from "./storage";
 
 const SLICE_MS = 12;
@@ -20,6 +21,7 @@ let relayURL = "";
 let memMiB = 0;
 let quiet = false;
 let withDisplay = false;
+let displayDevice = "";
 let splash = false;
 let deterministic = false;
 let engine = "";
@@ -37,9 +39,10 @@ let frames = 0;
 let statsSince = performance.now();
 const totals = { instructions: 0, busyMs: 0, frames: 0 };
 
-// Display: the page's canvas (when it could be transferred) or "frame"
-// messages back to the page.
-let ctx: OffscreenCanvasRenderingContext2D | undefined;
+// Display: the page's canvas (when it could be transferred), drawn with
+// WebGPU or 2D, or "frame" messages back to the page.
+let renderer: Renderer | undefined;
+let canvasSize: [number, number] | undefined; // displayed size in device pixels
 let postFrames = false;
 const screen = new Uint8Array(display.width * display.height * 4);
 let lastFrame = 0;
@@ -104,7 +107,7 @@ async function boot() {
     .mem as WebAssembly.Memory;
   void go.run(wasm.instance); // returns once Go's main blocks; the API is then registered
   api = (globalThis as unknown as { bootlet: BootletAPI }).bootlet;
-  api.create(memMiB, "", quiet, { display: withDisplay, splash, deterministic, engine });
+  api.create(memMiB, "", quiet, { display: withDisplay, displayDevice, splash, deterministic, engine });
   check(api.loadKernel(kernel));
   api.loadInitrd(initrd);
   const d = await disk;
@@ -218,7 +221,7 @@ function check(err: string | null) {
 // present copies display changes to the canvas, at most every FRAME_MS; a
 // change made just before the guest idles is picked up by a timer.
 function present() {
-  if (!api || (!ctx && !postFrames)) return;
+  if (!api || (!renderer && !postFrames)) return;
   const now = performance.now();
   if (now - lastFrame < FRAME_MS) {
     frameTimer ??= setTimeout(() => {
@@ -232,16 +235,42 @@ function present() {
   if (!rects) return;
   frames++;
   totals.frames++;
-  if (ctx) {
-    for (let i = 0; i < rects.length; i += 5) {
-      const [x, y, w, h, off] = rects.subarray(i, i + 5);
-      ctx.putImageData(new ImageData(new Uint8ClampedArray(screen.buffer, off, w * h * 4), w, h), x, y);
-    }
+  if (renderer) {
+    renderer.draw(rects, screen);
   } else {
     const last = rects.length - 5;
     const data = screen.slice(0, rects[last + 4] + rects[last + 2] * rects[last + 3] * 4);
     post({ type: "frame", rects, data }, [data.buffer, rects.buffer]);
   }
+}
+
+// useCanvas sets up drawing into the page's canvas. If the GPU device is
+// lost, it tries WebGPU once more (the canvas keeps its WebGPU context); if
+// that fails too, or the device was lost right away, the page swaps in a new
+// canvas for 2D.
+let gpuRetried = false;
+async function useCanvas(canvas: OffscreenCanvas, want: string) {
+  renderer = undefined;
+  const since = performance.now();
+  const lost = () => {
+    renderer = undefined;
+    if (!gpuRetried && performance.now() - since > 10_000) {
+      gpuRetried = true;
+      void useCanvas(canvas, "webgpu");
+    } else {
+      post({ type: "displayFallback" });
+    }
+  };
+  const r = await createRenderer(canvas, display.width, display.height, want, lost);
+  if (!r) {
+    if (want === "webgpu") post({ type: "displayFallback" });
+    return;
+  }
+  renderer = r;
+  if (canvasSize) r.resize(...canvasSize);
+  api?.displayInvalidate();
+  lastFrame = 0;
+  present();
 }
 
 function postStats() {
@@ -255,6 +284,7 @@ function postStats() {
     fps: frames / secs,
     memMiB: api.memory(),
     engine: api.engineStats(),
+    display: { device: withDisplay ? displayDevice || "simplefb" : "none", renderer: renderer?.kind ?? (postFrames ? "2d" : "none") },
     totalInstructions: totals.instructions,
     totalBusyMs: totals.busyMs,
     totalFrames: totals.frames,
@@ -330,6 +360,7 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
         memMiB = msg.memMiB;
         quiet = msg.quiet;
         withDisplay = msg.display;
+        displayDevice = msg.displayDevice;
         splash = msg.splash;
         deterministic = msg.deterministic;
         engine = msg.engine;
@@ -372,9 +403,11 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       wake();
       break;
     case "canvas":
-      ctx = msg.canvas.getContext("2d", { alpha: false }) ?? undefined;
-      api?.displayInvalidate();
-      present();
+      await useCanvas(msg.canvas, msg.renderer);
+      break;
+    case "canvasSize":
+      canvasSize = [msg.width, msg.height];
+      renderer?.resize(msg.width, msg.height);
       break;
     case "frames":
       postFrames = true;

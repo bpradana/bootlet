@@ -20,7 +20,7 @@ if ls /proc/device-tree/soc | grep -q virtio_mmio; then
   for m in $(cat /lib/modules/load.list); do
     insmod "/lib/modules/$m" 2>/dev/null && n=$((n + 1))
   done
-  ok "Finished Load Kernel Modules: $n drivers for virtio, ext4, overlayfs, networking and the keyboard."
+  ok "Finished Load Kernel Modules: $n drivers for virtio, ext4, overlayfs, networking, the keyboard and the display."
 fi
 
 if [ -e /proc/device-tree/soc/virtio_mmio@10001000 ]; then

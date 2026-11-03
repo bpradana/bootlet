@@ -106,6 +106,10 @@ func (v *Virtio) Read(off uint64, size int) (uint64, bool) {
 		return uint64(v.intStatus), true
 	case 0x070:
 		return uint64(v.status), true
+	case 0x0b0, 0x0b4, 0x0b8, 0x0bc:
+		// SHMLen/SHMBase of the selected shared memory region: all ones
+		// means there is none (virtio-gpu probes for one).
+		return 0xffffffff, true
 	case 0x0fc:
 		return 0, true // config generation
 	}

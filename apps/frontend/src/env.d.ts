@@ -11,7 +11,7 @@ type EngineStats = { engine: string; compiled: number; codeKiB: number; compileM
 
 /** The API registered by packages/emulator/cmd/wasm. */
 interface BootletAPI {
-  create(ramMiB: number, cmdline: string, quiet: boolean, opts?: { display: boolean; splash: boolean; deterministic: boolean; engine: string }): void;
+  create(ramMiB: number, cmdline: string, quiet: boolean, opts?: { display: boolean; displayDevice: string; splash: boolean; deterministic: boolean; engine: string }): void;
   loadKernel(image: Uint8Array): string | null;
   loadInitrd(cpio: Uint8Array): void;
   reset(): string | null;

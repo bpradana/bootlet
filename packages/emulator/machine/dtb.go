@@ -29,7 +29,7 @@ func (m *Machine) deviceTree(initrdStart, initrdEnd uint64) []byte {
 		chosen.Add("linux,initrd-start", fdt.U64(initrdStart)).
 			Add("linux,initrd-end", fdt.U64(initrdEnd))
 	}
-	if m.Display != nil {
+	if m.Display != nil && m.GPU == nil {
 		// Linux creates a platform device for a simple-framebuffer under
 		// /chosen; simpledrm drives it (/dev/dri/card0, /dev/fb0, fbcon).
 		chosen.Add("#address-cells", fdt.U32(2)).
@@ -134,6 +134,14 @@ func (m *Machine) deviceTree(initrdStart, initrdEnd uint64) []byte {
 			Add("reg", fdt.U64(InputBase, 0x1000)).
 			Add("interrupt-parent", fdt.U32(phandlePLIC)).
 			Add("interrupts", fdt.U32(InputIRQ))
+	}
+
+	if m.GPU != nil {
+		soc.Child("virtio_mmio@10005000").
+			Add("compatible", fdt.Str("virtio,mmio")).
+			Add("reg", fdt.U64(GPUBase, 0x1000)).
+			Add("interrupt-parent", fdt.U32(phandlePLIC)).
+			Add("interrupts", fdt.U32(GPUIRQ))
 	}
 
 	return fdt.Encode(root, 0)

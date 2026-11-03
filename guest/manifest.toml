@@ -18,8 +18,8 @@ required = [
 ]
 # Loadable modules copied into the initramfs (paths below lib/modules/<version>/),
 # with their dependencies: the persistent root disk (virtio-blk, ext4, overlay),
-# networking (virtio-net), the file explorer's port (virtio-console) and the
-# display's keyboard (virtio-input, read through evdev).
+# networking (virtio-net), the file explorer's port (virtio-console), the display's
+# keyboard (virtio-input, read through evdev) and the virtio-gpu display.
 modules = [
   "kernel/drivers/virtio/virtio_mmio.ko.gz",
   "kernel/drivers/block/virtio_blk.ko.gz",
@@ -29,6 +29,7 @@ modules = [
   "kernel/drivers/char/virtio_console.ko.gz",
   "kernel/drivers/virtio/virtio_input.ko.gz",
   "kernel/drivers/input/evdev.ko.gz",
+  "kernel/drivers/gpu/drm/virtio/virtio-gpu.ko.gz",
 ]
 
 # Userland. Every package is unpacked into the initramfs and recorded in apk's

@@ -48,12 +48,18 @@ export interface Display {
   /** Releases every held key (also done automatically on focus loss). */
   releaseAll(): void;
   shown(): boolean;
+  /** Replaces the canvas with one the worker draws with 2D (the GPU failed). */
+  fallback(): void;
 }
 
-export function initDisplay(opts: { send: (msg: ToWorker, transfer?: Transferable[]) => void; onHide: () => void }): Display {
+export function initDisplay(opts: {
+  send: (msg: ToWorker, transfer?: Transferable[]) => void;
+  onHide: () => void;
+  renderer: string; // "webgpu", "2d" or "" (WebGPU when available)
+}): Display {
   const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
   const pane = $("display-pane");
-  const canvas = $<HTMLCanvasElement>("display");
+  let canvas = $<HTMLCanvasElement>("display");
   const splitter = $("display-splitter");
   const toggleBtn = $<HTMLButtonElement>("display-toggle");
   const hint = $("display-hint");
@@ -61,10 +67,25 @@ export function initDisplay(opts: { send: (msg: ToWorker, transfer?: Transferabl
   canvas.height = display.height;
 
   // Prefer handing the canvas to the worker: pixels never cross threads.
+  // WebGPU there draws at the canvas's real size in device pixels.
   let ctx: CanvasRenderingContext2D | null = null;
-  if ("transferControlToOffscreen" in canvas) {
+  const ro = new ResizeObserver(([e]) => {
+    const box = e.devicePixelContentBoxSize?.[0];
+    const width = box ? box.inlineSize : Math.round(e.contentRect.width * devicePixelRatio);
+    const height = box ? box.blockSize : Math.round(e.contentRect.height * devicePixelRatio);
+    if (width > 0 && height > 0) opts.send({ type: "canvasSize", width, height });
+  });
+  function transfer(renderer: string) {
     const off = canvas.transferControlToOffscreen();
-    opts.send({ type: "canvas", canvas: off }, [off]);
+    opts.send({ type: "canvas", canvas: off, renderer }, [off]);
+    try {
+      ro.observe(canvas, { box: "device-pixel-content-box" });
+    } catch {
+      ro.observe(canvas); // Safari: content-box, scaled by devicePixelRatio
+    }
+  }
+  if ("transferControlToOffscreen" in canvas) {
+    transfer(opts.renderer);
   } else {
     ctx = (canvas as HTMLCanvasElement).getContext("2d", { alpha: false });
     opts.send({ type: "frames" });
@@ -80,31 +101,34 @@ export function initDisplay(opts: { send: (msg: ToWorker, transfer?: Transferabl
     held.clear();
   }
 
-  canvas.addEventListener("keydown", (e) => {
-    const code = keyCodes[e.code];
-    // Leave browser shortcuts (Cmd/Meta combinations) to the browser.
-    if (code === undefined || e.metaKey) return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (e.repeat || held.has(code)) return; // the guest sees one press per key
-    held.add(code);
-    key(code, true);
-  });
-  canvas.addEventListener("keyup", (e) => {
-    const code = keyCodes[e.code];
-    if (code === undefined) return;
-    e.preventDefault();
-    if (!held.delete(code)) return;
-    key(code, false);
-  });
-  canvas.addEventListener("blur", releaseAll);
+  function listen(c: HTMLCanvasElement) {
+    c.addEventListener("keydown", (e) => {
+      const code = keyCodes[e.code];
+      // Leave browser shortcuts (Cmd/Meta combinations) to the browser.
+      if (code === undefined || e.metaKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (e.repeat || held.has(code)) return; // the guest sees one press per key
+      held.add(code);
+      key(code, true);
+    });
+    c.addEventListener("keyup", (e) => {
+      const code = keyCodes[e.code];
+      if (code === undefined) return;
+      e.preventDefault();
+      if (!held.delete(code)) return;
+      key(code, false);
+    });
+    c.addEventListener("blur", releaseAll);
+    c.addEventListener("pointerdown", () => c.focus());
+    c.addEventListener("focus", () => (hint.dataset.focus = ""));
+    c.addEventListener("blur", () => delete hint.dataset.focus);
+  }
+  listen(canvas);
   window.addEventListener("blur", releaseAll);
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) releaseAll();
   });
-  canvas.addEventListener("pointerdown", () => canvas.focus());
-  canvas.addEventListener("focus", () => (hint.dataset.focus = ""));
-  canvas.addEventListener("blur", () => delete hint.dataset.focus);
 
   // ---- layout ----
 
@@ -160,5 +184,17 @@ export function initDisplay(opts: { send: (msg: ToWorker, transfer?: Transferabl
     },
     releaseAll,
     shown: () => !pane.hidden,
+    fallback() {
+      // The worker's GPU device is gone: a canvas keeps its first context
+      // type, so draw into a fresh one with 2D.
+      const focused = document.activeElement === canvas;
+      ro.unobserve(canvas);
+      const fresh = canvas.cloneNode(false) as HTMLCanvasElement;
+      canvas.replaceWith(fresh);
+      canvas = fresh;
+      listen(canvas);
+      transfer("2d");
+      if (focused) canvas.focus();
+    },
   };
 }

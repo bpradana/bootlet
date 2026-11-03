@@ -10,47 +10,68 @@ import (
 	"bootlet/emulator/machine"
 )
 
-// TestDisplay boots with the framebuffer and checks that Linux drives it
-// (simpledrm: /dev/fb0 and fbcon) and that guest pixel writes reach the host
-// through Display.Flush. Run with: go test -tags boot -run TestDisplay ./machine
+// TestDisplay boots with each display device and checks that Linux drives
+// it (simpledrm or virtio-gpu: /dev/fb0 and fbcon, and no second DRM device)
+// and that guest pixel writes reach the host through Display.Flush. With
+// virtio-gpu, the splash must also hand over to the guest. Run with:
+// go test -tags boot -run TestDisplay ./machine
 func TestDisplay(t *testing.T) {
-	g := newGuest(t, machine.Config{Display: true}, nil)
-	start := time.Now()
-	g.waitFor(prompt, 2*time.Minute)
-	t.Logf("shell prompt after %v", time.Since(start).Round(time.Millisecond))
-	d := g.m.Display
-	d.Flush() // drain everything drawn during boot
+	for _, dev := range []struct{ name, fb, driver string }{
+		{machine.DisplayFramebuffer, "simpledrm", "simple-framebuffer"},
+		{machine.DisplayVirtioGPU, "virtio_gpudrmfb", "virtio_gpu"},
+	} {
+		t.Run(dev.name, func(t *testing.T) {
+			gpu := dev.name == machine.DisplayVirtioGPU
+			g := newGuest(t, machine.Config{Display: true, DisplayDevice: dev.name, Splash: gpu}, nil)
+			start := time.Now()
+			g.waitFor(prompt, 2*time.Minute)
+			t.Logf("shell prompt after %v", time.Since(start).Round(time.Millisecond))
+			if gpu {
+				if g.m.SplashActive() || g.m.SplashHandover() == 0 {
+					t.Fatal("the guest never took over the display from the splash")
+				}
+				t.Logf("guest took over the display %v after reset", g.m.SplashHandover().Round(time.Millisecond))
+			}
+			d := g.m.Display
+			d.Flush() // drain everything drawn during boot
 
-	out := g.sh("cat /sys/class/graphics/fb0/virtual_size /sys/class/graphics/fb0/bits_per_pixel /sys/class/graphics/fb0/name", time.Minute)
-	for _, want := range []string{"640,480", "32", "simpledrm"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("fb0 sysfs missing %q:\n%s", want, out)
-		}
-	}
+			out := g.sh("cat /sys/class/graphics/fb0/virtual_size /sys/class/graphics/fb0/bits_per_pixel /sys/class/graphics/fb0/name; "+
+				"basename $(readlink /sys/class/drm/card0/device/driver); ls /sys/class/drm", time.Minute)
+			for _, want := range []string{"640,480", "32", dev.fb, dev.driver} {
+				if !strings.Contains(out, want) {
+					t.Errorf("sysfs missing %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "card1") {
+				t.Errorf("a second DRM device:\n%s", out)
+			}
 
-	// Fill the screen with white through /dev/fb0 and time how long it takes
-	// to become visible to the host (fbdev emulation may flush deferred).
-	g.m.Input([]byte("tr '\\000' '\\377' < /dev/zero | head -c 1228800 > /dev/fb0; echo filled\n"))
-	start = time.Now()
-	var whiteAt time.Duration
-	for time.Since(start) < time.Minute {
-		g.step()
-		if rects, _ := d.Flush(); len(rects) == 0 {
-			continue
-		}
-		// Check the middle of the screen: fbcon redraws the prompt at the top.
-		snap := d.Snapshot()
-		mid := snap[len(snap)/2:]
-		if mid[0] == 0xff && mid[1] == 0xff && mid[2] == 0xff && mid[3] == 0xff {
-			whiteAt = time.Since(start)
-			break
-		}
+			// Fill the screen with white through /dev/fb0 and time how long it
+			// takes to become visible to the host (fbdev emulation flushes
+			// deferred).
+			g.m.Input([]byte("tr '\\000' '\\377' < /dev/zero | head -c 1228800 > /dev/fb0; echo filled\n"))
+			start = time.Now()
+			var whiteAt time.Duration
+			for time.Since(start) < time.Minute {
+				g.step()
+				if rects, _ := d.Flush(); len(rects) == 0 {
+					continue
+				}
+				// Check the middle of the screen: fbcon redraws the prompt at the top.
+				snap := d.Snapshot()
+				mid := snap[len(snap)/2:]
+				if mid[0] == 0xff && mid[1] == 0xff && mid[2] == 0xff && mid[3] == 0xff {
+					whiteAt = time.Since(start)
+					break
+				}
+			}
+			if whiteAt == 0 {
+				t.Fatalf("framebuffer writes never reached the display")
+			}
+			t.Logf("guest fill visible after %v", whiteAt.Round(time.Millisecond))
+			g.waitFor("filled", time.Minute)
+		})
 	}
-	if whiteAt == 0 {
-		t.Fatalf("framebuffer writes never reached the display")
-	}
-	t.Logf("guest fill visible after %v", whiteAt.Round(time.Millisecond))
-	g.waitFor("filled", time.Minute)
 }
 
 // TestKeyboard checks that key events from the host reach the guest as
