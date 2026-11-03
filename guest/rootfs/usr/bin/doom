@@ -1,0 +1,14 @@
+#!/bin/sh
+# Launch the guest-native Doom port; keep saves and config on the guest disk.
+if [ ! -c /dev/fb0 ] || [ ! -c /dev/input/event0 ]; then
+    echo 'doom: enable the Bootlet display and keyboard, then reboot.' >&2
+    exit 1
+fi
+export HOME="${HOME:-/root}"
+printf '%s\n' 'Doom: click the graphical display to play.' 'Arrows: move/turn | Ctrl: fire | Space: use | Shift: run | Esc: menu' 'F10, then Y: quit. Sound is unavailable in Bootlet.'
+for arg in "$@"; do
+    if [ "$arg" = -iwad ]; then
+        exec /usr/lib/doom/doom -nosound -noendoom "$@"
+    fi
+done
+exec /usr/lib/doom/doom -nosound -noendoom -iwad /usr/share/doom/doom1.wad "$@"
