@@ -55,11 +55,14 @@ test("the display shows the splash, then Linux, and takes keyboard input", async
 
   const s = await stats(page);
   expect(s?.activeMips ?? 0).toBeGreaterThan(0);
-  // The browser runs guest code with the WebAssembly JIT by default, and
-  // draws the simple-framebuffer with WebGPU.
+  // The browser runs guest code with the WebAssembly JIT by default. The
+  // display is drawn with WebGPU where the browser can keep a GPU device;
+  // headless Chromium can't, so it falls back to 2D here (WebGPU isn't
+  // tested in CI).
   expect(s?.engine.engine).toBe("jit");
   expect(s?.engine.compiled ?? 0).toBeGreaterThan(0);
-  expect(s?.display).toEqual({ device: "simplefb", renderer: "webgpu" });
+  expect(s?.display.device).toBe("simplefb");
+  expect(["webgpu", "2d"]).toContain(s?.display.renderer);
 });
 
 test("a virtio-gpu display drawn with a 2D canvas shows the splash, then Linux", async ({ page }, info) => {
