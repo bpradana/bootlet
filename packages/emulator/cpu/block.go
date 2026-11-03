@@ -74,6 +74,24 @@ const (
 	kSH
 	kSW
 	kSD
+	kNOP // fence, fence.i: nothing to do on one hart with coherent fetch
+	// OP and OP-32 instructions run through the interpreter's op/op32.
+	kSLLW
+	kSRLW
+	kSRAW
+	kMUL
+	kMULH
+	kMULHSU
+	kMULHU
+	kDIV
+	kDIVU
+	kREM
+	kREMU
+	kMULW
+	kDIVW
+	kDIVUW
+	kREMW
+	kREMUW
 	// Control transfers: always the last instruction of a block.
 	kJAL
 	kJALR
@@ -98,6 +116,8 @@ type blockEntry struct {
 	gen   uint32
 	start uint32 // first op in the arena
 	n     uint16
+	hits  uint16 // executions, up to the JIT threshold
+	jit   uint8  // jitNone, jitQueued or jitDone
 }
 
 type blockCache struct {
@@ -134,7 +154,7 @@ func (c *CPU) BlockStats() (built, hits, flushes, pageInvalidations uint64) {
 	return
 }
 
-// FlushBlocks discards every decoded block (fence.i, reset).
+// FlushBlocks discards every decoded block and all compiled code (reset).
 func (c *CPU) FlushBlocks() {
 	b := c.blocks
 	if b == nil {
@@ -147,6 +167,23 @@ func (c *CPU) FlushBlocks() {
 	}
 	b.top = 0
 	clear(b.codePage)
+	b.Flushes++
+	if c.jit != nil {
+		c.jit.flush()
+	}
+}
+
+// recycleArena drops every decoded block to reuse the arena. Memory has not
+// changed, so compiled code stays, and so do the code-page flags that make
+// stores to its pages invalidate it.
+func (c *CPU) recycleArena() {
+	b := c.blocks
+	b.gen++
+	if b.gen == 0 {
+		clear(b.table)
+		b.gen = 1
+	}
+	b.top = 0
 	b.Flushes++
 }
 
@@ -170,10 +207,17 @@ func (c *CPU) InvalidateRange(pa, n uint64) {
 }
 
 // invalidatePage drops the blocks on RAM page p (a store hit decoded code).
+// It is kept out of line so codeStore stays small enough to inline into the
+// store fast path.
+//
+//go:noinline
 func (c *CPU) invalidatePage(p uint64) {
 	b := c.blocks
 	b.codePage[p] = 0
 	b.PageInvalidations++
+	if c.jit != nil {
+		c.jit.invalidatePage(p)
+	}
 	for i := range b.table {
 		e := &b.table[i]
 		if e.key != 0 && (e.key-1)>>12 == p {
@@ -182,24 +226,42 @@ func (c *CPU) invalidatePage(p uint64) {
 	}
 }
 
-// codeStore is called by stores to RAM offset off; it invalidates decoded
-// code there. Kept tiny so the check inlines into the store fast path.
+// codeStore is called by stores to RAM offset off when the block cache is
+// on (c.blocks != nil); it invalidates decoded code there. Kept tiny so it
+// inlines into the store fast path.
 func (c *CPU) codeStore(off uint64) {
-	if b := c.blocks; b != nil && b.codePage[off>>12] != 0 {
+	if c.blocks.codePage[off>>12] != 0 {
 		c.invalidatePage(off >> 12)
 	}
+}
+
+// tableSet returns the first of the two slots (a 2-way set) where the
+// compiled block at RAM offset off may live, in a table of size entries.
+// Mixing in higher bits spreads code that sits at the same offset in
+// different 128 KiB regions.
+func tableSet(off uint64, size int) uint64 {
+	return ((off>>1 ^ off>>17) & uint64(size-1)) &^ 1
+}
+
+// find returns the live entry for the block at RAM offset off, or nil. The
+// block table is direct-mapped: measured faster than 2-way sets here.
+func (b *blockCache) find(off uint64) *blockEntry {
+	if e := &b.table[(off>>1)&blockMaskTab]; e.key == off+1 && e.gen == b.gen {
+		return e
+	}
+	return nil
 }
 
 // lookup returns the block starting at RAM offset off, decoding it if needed.
 func (c *CPU) lookup(off uint64) *blockEntry {
 	b := c.blocks
-	e := &b.table[(off>>1)&blockMaskTab]
-	if e.key == off+1 && e.gen == b.gen {
+	if e := b.find(off); e != nil {
 		b.Hits++
 		return e
 	}
+	e := &b.table[(off>>1)&blockMaskTab]
 	if b.top+blockMax > len(b.ops) {
-		c.FlushBlocks()
+		c.recycleArena()
 	}
 	start := b.top
 	first := off
@@ -334,18 +396,41 @@ func decode(insn uint32, length uint8) dop {
 			case 5:
 				op.kind = kSRA
 			}
+		case 1:
+			op.kind = [...]uint8{kMUL, kMULH, kMULHSU, kMULHU, kDIV, kDIVU, kREM, kREMU}[f3]
 		}
 	case 0x3b:
-		if f3 == 0 {
-			switch f7 {
+		switch {
+		case f3 == 0 && f7 == 0:
+			op.kind = kADDW
+		case f3 == 0 && f7 == 0x20:
+			op.kind = kSUBW
+		case f3 == 1 && f7 == 0:
+			op.kind = kSLLW
+		case f3 == 5 && f7 == 0:
+			op.kind = kSRLW
+		case f3 == 5 && f7 == 0x20:
+			op.kind = kSRAW
+		case f7 == 1:
+			switch f3 {
 			case 0:
-				op.kind = kADDW
-			case 0x20:
-				op.kind = kSUBW
+				op.kind = kMULW
+			case 4:
+				op.kind = kDIVW
+			case 5:
+				op.kind = kDIVUW
+			case 6:
+				op.kind = kREMW
+			case 7:
+				op.kind = kREMUW
 			}
 		}
-	case 0x0f, 0x73:
-		op.kind = kExecEnd // fence/fence.i, system and CSR instructions
+	case 0x0f:
+		if f3 <= 1 {
+			op.kind = kNOP // fence, fence.i (see exec)
+		}
+	case 0x73:
+		op.kind = kExecEnd // system and CSR instructions
 	}
 	return op
 }
@@ -420,6 +505,11 @@ func (c *CPU) runBlock(e *blockEntry, pc uint64, max int) int {
 			x[op.rd] = sext32(uint64(uint32(x[op.rs1]) + uint32(x[op.rs2])))
 		case kSUBW:
 			x[op.rd] = sext32(uint64(uint32(x[op.rs1]) - uint32(x[op.rs2])))
+		case kNOP:
+		case kMUL, kMULH, kMULHSU, kMULHU, kDIV, kDIVU, kREM, kREMU:
+			c.op(op.insn, uint32(op.rd), x[op.rs1], x[op.rs2], op.insn>>12&7)
+		case kSLLW, kSRLW, kSRAW, kMULW, kDIVW, kDIVUW, kREMW, kREMUW:
+			c.op32(op.insn, uint32(op.rd), x[op.rs1], x[op.rs2], op.insn>>12&7)
 
 		case kLB, kLH, kLW, kLD, kLBU, kLHU, kLWU:
 			c.PC = pc // a fault reports this instruction
@@ -522,16 +612,63 @@ func (c *CPU) runBlocks(n int) int {
 			return i
 		}
 		pc := c.PC
+		if pc>>12 != c.fetchTag {
+			c.fetchCache(pc)
+		}
 		if pc>>12 == c.fetchTag && pc&1 == 0 {
-			if e := c.lookup(c.fetchOff + pc&0xfff); e != nil {
+			off := c.fetchOff + pc&0xfff
+			if j := c.jit; j != nil && j.compiled(off) {
+				// Compiled: run compiled blocks until one exits.
+				done, code := c.jitEnter(n - i)
+				i += done
+				if code == jitStep {
+					c.step()
+					i++
+					continue
+				}
+				if done > 0 {
+					continue
+				}
+				// Nothing ran (a masked pending interrupt, the budget, a
+				// TLB entry evicted since): run this block here.
+				pc, off = c.PC, c.fetchOff+c.PC&0xfff
+			}
+			if e := c.lookup(off); e != nil {
 				i += c.runBlock(e, pc, n-i)
+				if c.jit != nil {
+					c.jitHit(e)
+				}
 				continue
 			}
 		}
 		c.step()
 		i++
 	}
+	if j := c.jit; j != nil && len(j.queue) > 0 {
+		if j.waiting++; j.waiting >= jitMaxWait {
+			c.jitCompile()
+		}
+	}
 	return i
+}
+
+// fetchCache points the fetch page cache at pc's page if its translation
+// is at hand (no paging, or an instruction TLB hit with permission), as a
+// fetch from it would. It changes no architectural state; on a TLB miss the
+// next fetch walks the page tables as usual.
+func (c *CPU) fetchCache(pc uint64) {
+	pa := pc
+	if c.fetchPaging {
+		e := &c.itlb[(pc>>12)%tlbSize]
+		if e.tag != pc>>12 || !c.permitted(e.flags, accFetch, c.Priv) {
+			return
+		}
+		pa = e.page | pc&0xfff
+	}
+	if off := pa - c.RAMBase; off < uint64(len(c.RAM)) {
+		c.fetchTag = pc >> 12
+		c.fetchOff = off &^ 0xfff
+	}
 }
 
 // step executes one instruction with the interpreter (the body of Run).

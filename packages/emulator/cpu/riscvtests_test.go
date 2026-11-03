@@ -25,33 +25,68 @@ func TestRISCVTests(t *testing.T) {
 	if len(files) == 0 {
 		t.Skip("riscv-tests not built; run `mise run emu:riscv-tests`")
 	}
-	for _, blocks := range []bool{false, true} {
-		engine := map[bool]string{false: "interp", true: "blocks"}[blocks]
+	for _, engine := range engines(t) {
 		for _, f := range files {
 			name := engine + "/" + filepath.Base(filepath.Dir(f)) + "-p-" + filepath.Base(f)
 			t.Run(name, func(t *testing.T) {
 				t.Parallel()
-				runTest(t, f, blocks)
+				runTest(t, f, engine)
 			})
 		}
 	}
 }
 
-// TestEngineLockstep runs every test on both engines side by side and
-// compares the complete architectural state (registers, PC, privilege,
-// instruction count, memory) after every slice of instructions.
+// engines lists the execution engines this build can run: the JIT only
+// exists under a WebAssembly host (go test -exec scripts/go_js_wasm_exec_jit
+// with GOOS=js GOARCH=wasm). Tests compile blocks after a single execution.
+func engines(t *testing.T) []string {
+	*cpu.JITThreshold = 1
+	e := []string{"interp", "blocks"}
+	if cpu.New(make([]byte, 4096), base, nobus{}).UseJIT() {
+		e = append(e, "jit")
+	} else {
+		t.Log("no WebAssembly host: the JIT is not tested")
+	}
+	return e
+}
+
+func useEngine(t *testing.T, c *cpu.CPU, engine string) {
+	switch engine {
+	case "blocks":
+		c.UseBlocks(true)
+	case "jit":
+		if !c.UseJIT() {
+			t.Fatal("JIT unavailable")
+		}
+	}
+}
+
+// TestEngineLockstep runs every test on the interpreter and each faster
+// engine side by side and compares the complete architectural state
+// (registers, PC, privilege, instruction count, memory) after every slice of
+// instructions.
 func TestEngineLockstep(t *testing.T) {
 	files, _ := filepath.Glob(filepath.Join(testsDir, "*", "*"))
 	if len(files) == 0 {
 		t.Skip("riscv-tests not built; run `mise run emu:riscv-tests`")
 	}
-	for _, f := range files {
-		name := filepath.Base(filepath.Dir(f)) + "-p-" + filepath.Base(f)
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
+	for _, engine := range engines(t)[1:] {
+		for _, f := range files {
+			name := engine + "/" + filepath.Base(filepath.Dir(f)) + "-p-" + filepath.Base(f)
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				lockstep(t, f, engine)
+			})
+		}
+	}
+}
+
+func lockstep(t *testing.T, f, engine string) {
+	{
+		{
 			a, ramA, tohost := load(t, f)
 			b, ramB, _ := load(t, f)
-			b.UseBlocks(true)
+			useEngine(t, b, engine)
 			for step := 0; step < 20000; step++ {
 				n := 1 + step%53 // vary slice boundaries
 				a.Run(n)
@@ -67,7 +102,7 @@ func TestEngineLockstep(t *testing.T) {
 					return
 				}
 			}
-		})
+		}
 	}
 }
 
@@ -92,9 +127,9 @@ func load(t *testing.T, path string) (*cpu.CPU, []byte, uint64) {
 	return c, ram, tohost
 }
 
-func runTest(t *testing.T, path string, blocks bool) {
+func runTest(t *testing.T, path string, engine string) {
 	c, ram, tohost := load(t, path)
-	c.UseBlocks(blocks)
+	useEngine(t, c, engine)
 	for i := 0; i < 1000; i++ {
 		c.Run(10000)
 		if v := binary.LittleEndian.Uint64(ram[tohost-base:]); v != 0 {

@@ -6,6 +6,9 @@ declare class Go {
 
 declare module "*/wasm_exec.js";
 
+/** See EngineStats in @bootlet/shared. */
+type EngineStats = { engine: string; compiled: number; codeKiB: number; compileMs: number; entries: number };
+
 /** The API registered by packages/emulator/cmd/wasm. */
 interface BootletAPI {
   create(ramMiB: number, cmdline: string, quiet: boolean, opts?: { display: boolean; splash: boolean; deterministic: boolean; engine: string }): void;
@@ -46,6 +49,8 @@ interface BootletAPI {
   displayInvalidate(): void;
   /** A key press or release on the virtio keyboard (Linux KEY_* code). */
   keyEvent(code: number, down: boolean): void;
+  /** How guest code runs: "interp", "blocks" or "jit", with JIT counters. */
+  engineStats(): EngineStats;
 }
 
 interface ImportMetaEnv {

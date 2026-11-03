@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 
-type Stats = { mips: number; activeMips: number; fps: number };
+type Stats = { mips: number; activeMips: number; fps: number; engine: { engine: string; compiled: number } };
 const stats = (page: Page) => page.evaluate(() => (globalThis as unknown as { __bootlet: { stats?: Stats } }).__bootlet.stats);
 
 async function bootToPrompt(page: Page) {
@@ -49,6 +49,9 @@ test("the display shows the splash, then Linux, and takes keyboard input", async
 
   const s = await stats(page);
   expect(s?.activeMips ?? 0).toBeGreaterThan(0);
+  // The browser runs guest code with the WebAssembly JIT by default.
+  expect(s?.engine.engine).toBe("jit");
+  expect(s?.engine.compiled ?? 0).toBeGreaterThan(0);
 });
 
 test("the display can be turned off", async ({ page }) => {

@@ -57,6 +57,7 @@ export type FromWorker =
       totalInstructions: number;
       totalBusyMs: number;
       totalFrames: number;
+      engine: EngineStats;
     }
   // Changed display regions as [x, y, w, h, offset] quintuples, with their
   // RGBA pixels packed row by row from offset in data.
@@ -64,6 +65,10 @@ export type FromWorker =
   | { type: "storage"; backend: "opfs" | "indexeddb" | "none"; detail?: string }
   | { type: "net"; state: NetState }
   | { type: "agent"; data: Uint8Array }; // bytes from the guest's file agent
+
+/** How guest code runs: the interpreter, the decoded-block cache, or the
+ * WebAssembly JIT (with its counters since the machine was created). */
+export type EngineStats = { engine: string; compiled: number; codeKiB: number; compileMs: number; entries: number };
 
 /** The worker's once-a-second emulator statistics. */
 export type EmulatorStats = Extract<FromWorker, { type: "stats" }>;

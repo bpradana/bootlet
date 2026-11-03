@@ -83,6 +83,12 @@ async function fetchAsset(url: string, label: string): Promise<Uint8Array> {
 async function boot() {
   post({ type: "state", state: "loading" });
   const go = new Go();
+  // The emulator's JIT (packages/emulator/cpu/jit.go) shares the emulator's
+  // memory with the modules it generates, and calls its dispatcher through
+  // this import, which the JIT points at the dispatcher once it has one.
+  const jit = { run: () => 2 /* no compiled code yet */ };
+  (globalThis as unknown as { bootletJit: typeof jit }).bootletJit = jit;
+  (go.importObject as Record<string, unknown>).bootlet = { jit_run: () => jit.run() };
   // OPFS is read on demand once the machine runs; only the IndexedDB
   // fallback loads every stored block up front.
   const disk = openStore().then(
@@ -94,6 +100,8 @@ async function boot() {
     fetchAsset(assets.kernel, "kernel"),
     fetchAsset(assets.initrd, "initramfs"),
   ]);
+  (globalThis as unknown as { bootletWasmMemory: WebAssembly.Memory }).bootletWasmMemory = wasm.instance.exports
+    .mem as WebAssembly.Memory;
   void go.run(wasm.instance); // returns once Go's main blocks; the API is then registered
   api = (globalThis as unknown as { bootlet: BootletAPI }).bootlet;
   api.create(memMiB, "", quiet, { display: withDisplay, splash, deterministic, engine });
@@ -246,6 +254,7 @@ function postStats() {
     activeMips: busyMs > 0 ? instructions / busyMs / 1000 : 0,
     fps: frames / secs,
     memMiB: api.memory(),
+    engine: api.engineStats(),
     totalInstructions: totals.instructions,
     totalBusyMs: totals.busyMs,
     totalFrames: totals.frames,

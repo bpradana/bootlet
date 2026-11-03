@@ -74,6 +74,10 @@ type Config struct {
 const (
 	EngineBlocks = "blocks"
 	EngineInterp = "interp"
+	// EngineJIT adds the WebAssembly JIT on top of the block cache where
+	// there is a WebAssembly host to compile it (the browser); elsewhere it
+	// is EngineBlocks.
+	EngineJIT = "jit"
 )
 
 // DeterministicIPS is the guest's notion of speed in deterministic mode.
@@ -159,7 +163,15 @@ func New(cfg Config) *Machine {
 	}
 	m.bus.Map(RTCBase, 0x1000, rtc)
 	m.CPU = cpu.New(m.RAM, RAMBase, &m.bus)
-	m.CPU.UseBlocks(cfg.Engine != EngineInterp)
+	switch cfg.Engine {
+	case EngineInterp:
+	case EngineJIT:
+		if !m.CPU.UseJIT() {
+			m.CPU.UseBlocks(true)
+		}
+	default:
+		m.CPU.UseBlocks(true)
+	}
 	m.CPU.Ecall = m.sbi
 	m.UART.IRQ = func(level bool) { m.PLIC.SetLevel(UARTIRQ, level) }
 	m.PLIC.Line = func(ctx int, level bool) {

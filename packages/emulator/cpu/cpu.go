@@ -107,11 +107,18 @@ type CPU struct {
 	fetchTag uint64
 	fetchOff uint64
 
-	itlb [tlbSize]tlbEntry
-	dtlb [tlbSize]tlbEntry
-
 	blocks    *blockCache // decoded blocks (see block.go); kept across Reset
 	blockMode bool
+	jit       *jitState // WebAssembly JIT (see jit.go); kept across Reset
+	jitLimit  uint64    // instret at which compiled code must stop
+
+	tlbFilled   []uint16 // TLB slots filled since the last flush (see flushTLB)
+	tlbOverflow bool
+
+	// The TLBs come last: they are large, and fields at large offsets cost
+	// an extra instruction per access on some hosts (arm64).
+	itlb [tlbSize]tlbEntry
+	dtlb [tlbSize]tlbEntry
 }
 
 func New(ram []byte, ramBase uint64, bus Bus) *CPU {
@@ -122,8 +129,13 @@ func New(ram []byte, ramBase uint64, bus Bus) *CPU {
 
 // Reset puts the hart in M-mode at pc with all state cleared.
 func (c *CPU) Reset(pc uint64) {
-	ram, base, bus, ecall, blocks, mode := c.RAM, c.RAMBase, c.Bus, c.Ecall, c.blocks, c.blockMode
-	*c = CPU{RAM: ram, RAMBase: base, Bus: bus, Ecall: ecall, blocks: blocks, blockMode: mode}
+	ram, base, bus, ecall, blocks, mode, jit := c.RAM, c.RAMBase, c.Bus, c.Ecall, c.blocks, c.blockMode, c.jit
+	filled := c.tlbFilled[:0]
+	if filled == nil {
+		filled = make([]uint16, 0, tlbSize/2)
+	}
+	*c = CPU{RAM: ram, RAMBase: base, Bus: bus, Ecall: ecall, blocks: blocks, blockMode: mode, jit: jit, tlbFilled: filled}
+	c.tlbOverflow = true // the TLB arrays are zeroed, not empty: clear them fully
 	c.FlushBlocks()
 	c.PC = pc
 	c.Priv = PrivM

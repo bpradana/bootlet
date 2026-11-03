@@ -77,7 +77,8 @@ Python 3.14.10 on riscv64
 | ✨ **Boot splash** | The emulator draws bootlet's power-on screen on the display until Linux draws its first pixel (no firmware involved). `?splash=0` turns it off. |
 | 📂 **File explorer** | A side panel browses the guest's whole filesystem. Drop files or folders from your computer to upload them, drag items onto folders to move them, and drag files out (Chrome, Edge) or double-click to download. |
 | 📊 **Live system stats** | The panel's System tab shows the guest's CPU, memory, storage, network, and top processes, plus the emulator's speed (MIPS) and memory, with a history graph. |
-| ⚡ **Decoded-block cache** | Straight-line runs of guest code are decoded once and cached (bounded, about 7 MiB), with exact instruction counts, precise traps, and invalidation on any write to cached code. In the browser it is about 25–75% faster than the plain interpreter, which remains the reference (`?engine=interp`). |
+| 🚀 **WebAssembly JIT** | In the browser, hot guest code is translated to WebAssembly and runs at 45–110 MIPS, about 1.6–3.4× the plain interpreter. It matches the interpreter exactly, down to instruction counts and the instruction each interrupt is taken at. See [docs/jit.md](docs/jit.md). |
+| ⚡ **Decoded-block cache** | Straight-line runs of guest code are decoded once and cached (bounded, about 7 MiB), with exact instruction counts, precise traps, and invalidation on any write to cached code. It feeds the JIT and runs native builds. The interpreter remains the reference (`?engine=blocks`, `?engine=interp`). |
 | 💤 **Idles at idle** | When the guest executes `wfi`, the worker sleeps until the next timer event, keystroke, or network packet, so a VM at a prompt costs almost no CPU. |
 | 🧩 **No toolchain for the guest** | `guestpack` (pure Go) downloads and verifies pinned Alpine packages and packs the initramfs. The file explorer's guest agent is cross-compiled by Go itself. No cross compiler, Buildroot, or Docker is needed. |
 | 🖥️ **Native and WASM from one codebase** | The `machine` package drives both `cmd/bootlet` (a terminal runner with direct sockets) and `cmd/wasm` (the browser build). |
@@ -434,8 +435,8 @@ The display is separate from the serial console. Console bytes still go through 
   at 15 frames per second and redraws only the bar and status line. Before every frame it
   checks that the framebuffer still holds exactly what it drew last. The first pixel the
   guest changes (simpledrm/fbcon taking over, about 0.4 s natively and 2 s in the browser)
-  ends it for good, so it never covers guest output. Boot time with and without it is
-  within run-to-run noise.
+  ends it for good, so it never covers guest output. It does not slow the boot. In
+  Chromium, the boot to the prompt took 10.0–10.6 s with it and 10.5–10.6 s without it.
 - **Page parameters.** `?display=0` boots without the display and keyboard, and
   `?splash=0` skips the splash. The **Display** button hides the pane, and the splitter
   resizes it.
@@ -480,6 +481,7 @@ for {
 | `input(Uint8Array)` | `Input` |
 | `displayFlush(out)` → `[x, y, w, h, offset]…`, `displayInvalidate()` | `Display.Flush`, `Display.Invalidate` |
 | `keyEvent(code, down)` | `KeyEvent` |
+| `engineStats()` → `{engine, compiled, codeKiB, compileMs, entries}` | `CPU.JITActive`, `CPU.JITStats` (`engine`: `jit` by default, `blocks` or `interp` with `?engine=`) |
 
 The physical memory map follows QEMU's `virt` machine:
 
@@ -504,27 +506,32 @@ the time spent executing guest code. **Wall** MIPS divides by elapsed time, so i
 falls while the guest idles or the browser is busy elsewhere. *Deterministic boot* is
 the most repeatable figure: with `Config.Deterministic` (`?deterministic` in the page),
 guest time comes from the instruction count and the random seed and clock are fixed, so
-every run executes the same instruction stream. The workloads are guest shell commands:
+natively every run executes the same instruction stream. In the page the count still varies
+by a few percent between runs, from asynchronous input such as the terminal's size reply,
+but there is no idle time in the measurement. The workloads are guest shell commands:
 `md5sum` of 16 MiB, `gzip -1` of 2 MiB, and a 20,000-iteration shell loop.
 
-| Browser (WebAssembly) | Interpreter | Decoded-block cache |
-|---|---|---|
-| Deterministic boot | 9.4 s · 28.0 MIPS | 7.6 s · 34.6 MIPS (+24%) |
-| Boot to the shell prompt (wall) | 13.1 s · 26.5 MIPS | 10.2 s · 32.3 MIPS |
-| `md5sum` 16 MiB | 10.3 s · 32.3 MIPS | 5.8 s · 56.6 MIPS (+75%) |
-| `gzip -1` 2 MiB | 10.4 s · 30.4 MIPS | 7.3 s · 40.6 MIPS (+34%) |
-| Shell loop | 17.9 s · 26.7 MIPS | 13.4 s · 33.9 MIPS (+27%) |
+| Browser (WebAssembly) | Interpreter | Decoded-block cache | JIT (default) |
+|---|---|---|---|
+| Deterministic boot | 9.2 s · 28.4 MIPS | 8.4 s · 31.6 MIPS | 5.9 s · 45.0 MIPS (1.6×) |
+| Boot to the shell prompt (wall) | 12.6 s · 27.1 MIPS | 10.9 s · 30.8 MIPS | 7.7 s · 42.1 MIPS |
+| `md5sum` 16 MiB | 10.4 s · 32.9 MIPS | 6.4 s · 51.6 MIPS | 2.8 s · 112.0 MIPS (3.4×) |
+| `gzip -1` 2 MiB | 10.4 s · 30.6 MIPS | 8.3 s · 37.5 MIPS | 2.8 s · 103.2 MIPS (3.4×) |
+| Shell loop | 16.9 s · 27.6 MIPS | 14.9 s · 31.6 MIPS | 4.3 s · 93.6 MIPS (3.4×) |
 
-| Native | Interpreter | Decoded-block cache |
+| Native (no JIT) | Interpreter | Decoded-block cache |
 |---|---|---|
-| Deterministic boot (245 M instructions) | 2.41 s · 101.5 MIPS | 2.05 s · 119.7 MIPS (+18%) |
-| Boot to the shell prompt (wall) | 3.04 s | 2.62 s |
-| `md5sum` 16 MiB | 1.89 s · 149.5 MIPS | 1.00 s · 279.1 MIPS (+87%) |
-| `gzip -1` 2 MiB | 1.78 s · 139.1 MIPS | 1.22 s · 199.4 MIPS (+43%) |
-| Shell loop | 3.94 s · 99.5 MIPS | 3.21 s · 121.0 MIPS (+22%) |
+| Deterministic boot (253 M instructions) | 2.4 s · 101.5 MIPS | 2.1 s · 118.8 MIPS (+17%) |
+| `md5sum` 16 MiB | 1.9 s · 149.5 MIPS | 1.1 s · 264.5 MIPS (+77%) |
+| `gzip -1` 2 MiB | 1.8 s · 139.1 MIPS | 1.3 s · 182.5 MIPS (+31%) |
+| Shell loop | 3.9 s · 99.5 MIPS | 3.2 s · 123.4 MIPS (+24%) |
 
 Speeds are active MIPS. The MIPS figures are measured; the times include the shell
 around each command. Browser boot times are from the "booting" state, after the downloads.
+The block cache's browser figures are 5–10% below the ones measured when it was
+introduced. The JIT work enlarged the TLBs and added decoded operations that the block
+cache shares. Natively, interleaved runs against that version put it within ±3% on boot,
+`md5sum`, and the shell loop, and about 5% lower on `gzip`.
 
 **Where the time went.** Profiling the interpreter (`go test -cpuprofile` on the
 benchmarks) put about three quarters of the time in the run loop and `exec`: fetching,
@@ -534,8 +541,8 @@ once.
 
 **The decoded-block cache** (`cpu/block.go`) turns straight-line runs of up to 64
 instructions into pre-decoded operations, keyed by physical address. The common
-integer, load/store, and branch operations run inline. Everything else (FP, M, AMO, CSR,
-system) goes through the interpreter's `exec`.
+integer, M-extension, load/store, `fence`, and branch operations run inline. Everything
+else (FP, AMO, CSR, system) goes through the interpreter's `exec`.
 
 - **Precise and identical.** Each instruction updates `instret` and, before anything
   that can trap, the PC. A block stops at any control transfer, system or CSR
@@ -553,8 +560,8 @@ system) goes through the interpreter's `exec`.
   `fence.i` a no-op. Linux issues it on every new executable mapping, so flushing there
   had cost 860 full flushes per boot.
 - **Bounded.** A fixed 32K-entry table and a 256K-operation arena (about 6.8 MiB) are
-  allocated once. A full arena flushes everything, about 33 times per boot, with no
-  allocation on the hot path. Larger sizes gained about 3% more for twice the memory.
+  allocated once. A full arena drops every decoded block, about 33 times per boot, with
+  no allocation on the hot path. Larger sizes gained about 3% more for twice the memory.
 - **The interpreter stays.** It is the reference and the fallback: `?engine=interp` in
   the page, `Config.Engine = machine.EngineInterp` in Go. The riscv-tests run on both
   engines, and `TestEngineLockstep` compares registers, PC, privilege, instruction count,
@@ -567,8 +574,16 @@ system) goes through the interpreter's `exec`.
   re-decoded. Gains are largest in tight loops (`md5sum`) and smallest in boot, which
   runs a lot of code once.
 
-The next step, translating hot blocks to WebAssembly, is scoped separately in
-[docs/jit-followup.md](docs/jit-followup.md).
+**The WebAssembly JIT** (`cpu/jit.go`) builds on the block cache. Blocks that run often
+are compiled in batches into WebAssembly modules. A generated dispatcher runs compiled
+blocks back to back inside WebAssembly. Generated code reads and writes guest registers
+and RAM in the emulator's own memory. Anything it doesn't handle inline exits to the
+interpreter at exactly that instruction: TLB misses, MMIO, stores to code, FP, atomics,
+and CSRs. The block cache's precision and invalidation therefore carry over. It is tested
+under Node, where Go's WebAssembly build has a host to compile for (`mise run
+emu:test`, `emu:boot-test`): the riscv-tests, the lockstep comparison, and a
+deterministic Linux boot, byte-identical to the interpreter. Design, costs, and next
+steps are in [docs/jit.md](docs/jit.md).
 
 Package installs are CPU-bound (decompressing and writing files at emulated speed). They
 are one-time costs, since the result persists.
@@ -599,7 +614,7 @@ Windows into a GitHub release. The network menu links to `releases/latest`.
 | Relay with the site embedded (this OS · all OSes) | `mise run relay:build` · `mise run relay:dist` |
 | Boot natively in the terminal, with networking | `mise run emu:run` |
 | Fetch and pack the guest | `mise run guest:fetch` |
-| Go unit tests (CPU + riscv-tests, devices, netstack, Wisp, relay, guest tools) | `mise run emu:test` |
+| Go unit tests (CPU + riscv-tests on every engine, the JIT under Node, devices, netstack, Wisp, relay, guest tools) | `mise run emu:test` |
 | Native boot and crash tests (shell, HTTP through the stack, persistence across reboot, consistency after a simulated tab close) | `mise run emu:boot-test` (`BOOTLET_ONLINE=1` adds a real `apk add`) |
 | Browser end-to-end tests (Playwright; boot, Reset disk, relay networking) | `mise run web:e2e` |
 | Benchmarks, native · in Chromium (`BOOTLET_ENGINE=interp` · `BENCH_QUERY=engine=interp`; results in `bench-results/`) | `mise run bench:native` · `mise run bench:web` |
@@ -643,9 +658,9 @@ go run ./cmd/bootlet -kernel ../../guest/out/Image -initrd ../../guest/out/initr
   until it closes.
 - **Simple display.** One fixed resolution, with no GPU acceleration, mouse, or sound.
   The display is a linear framebuffer, so software-rendered graphics only.
-- **Emulation speed.** CPU-heavy work runs at roughly 30–60 MIPS in the browser.
-  Translating hot blocks to WebAssembly is the next step
-  ([docs/jit-followup.md](docs/jit-followup.md)).
+- **Emulation speed.** Hot code runs at about 90–110 MIPS in the browser, and code that
+  runs only a few times at 30–45 MIPS. Atomics, CSR accesses, and TLB misses still leave
+  compiled code ([docs/jit.md](docs/jit.md) lists what is next).
 - **Memory.** Guest RAM (`?mem=`, 128 MiB by default) is allocated up front. Disk
   contents are read on demand with OPFS but held in memory with the IndexedDB fallback,
   and downloads have no backpressure from the relay. WebAssembly memory never shrinks, so
