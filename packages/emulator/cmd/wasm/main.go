@@ -45,6 +45,9 @@ func main() {
 	api.Set("attachAgent", js.FuncOf(attachAgent))
 	api.Set("agentInput", js.FuncOf(agentInput))
 	api.Set("agentOutput", js.FuncOf(agentOutput))
+	api.Set("displayFlush", js.FuncOf(displayFlush))
+	api.Set("displayInvalidate", js.FuncOf(displayInvalidate))
+	api.Set("keyEvent", js.FuncOf(keyEvent))
 	js.Global().Set("bootlet", api)
 	select {}
 }
@@ -62,8 +65,9 @@ func bytesFrom(v js.Value) []byte {
 	return b
 }
 
-// create(ramMiB: number, cmdline: string, quiet: boolean). An empty
-// cmdline uses the default; quiet hides the kernel's boot log.
+// create(ramMiB: number, cmdline: string, quiet: boolean, opts?: {display, splash})
+// An empty cmdline uses the default; quiet hides the kernel's boot log;
+// display adds the framebuffer; splash shows the power-on screen on it.
 func create(_ js.Value, args []js.Value) any {
 	cfg := machine.Config{Cmdline: machine.DefaultCmdline}
 	if len(args) > 0 && args[0].Truthy() {
@@ -75,7 +79,18 @@ func create(_ js.Value, args []js.Value) any {
 	if len(args) > 2 && args[2].Truthy() {
 		cfg.Cmdline += " " + machine.QuietCmdline
 	}
+	if len(args) > 3 && args[3].Truthy() {
+		cfg.Display = args[3].Get("display").Truthy()
+		cfg.Splash = args[3].Get("splash").Truthy()
+		cfg.Deterministic = args[3].Get("deterministic").Truthy()
+		if e := args[3].Get("engine"); e.Truthy() {
+			cfg.Engine = e.String()
+		}
+	}
 	m = machine.New(cfg)
+	if cfg.Display {
+		m.AttachKeyboard()
+	}
 	return nil
 }
 
@@ -286,4 +301,45 @@ func agentOutput(js.Value, []js.Value) any {
 	arr := js.Global().Get("Uint8Array").New(len(out))
 	js.CopyBytesToJS(arr, out)
 	return arr
+}
+
+// displayFlush(out: Uint8Array): Int32Array | null copies the framebuffer
+// regions changed since the last call into out as RGBA, and returns them as
+// [x, y, w, h, offset] quintuples (offset into out, rows packed w*4 bytes).
+// out must hold a whole screen.
+func displayFlush(_ js.Value, args []js.Value) any {
+	if m == nil || m.Display == nil {
+		return nil
+	}
+	rects, data := m.Display.Flush()
+	if len(rects) == 0 {
+		return nil
+	}
+	js.CopyBytesToJS(args[0], data)
+	r := js.Global().Get("Int32Array").New(5 * len(rects))
+	for i, x := range rects {
+		r.SetIndex(5*i, x.X)
+		r.SetIndex(5*i+1, x.Y)
+		r.SetIndex(5*i+2, x.W)
+		r.SetIndex(5*i+3, x.H)
+		r.SetIndex(5*i+4, x.Off)
+	}
+	return r
+}
+
+// displayInvalidate() makes the next displayFlush return the whole screen.
+func displayInvalidate(js.Value, []js.Value) any {
+	if m != nil && m.Display != nil {
+		m.Display.Invalidate()
+	}
+	return nil
+}
+
+// keyEvent(code: number, down: boolean) presses or releases a key on the
+// virtio keyboard (code is a Linux KEY_* code).
+func keyEvent(_ js.Value, args []js.Value) any {
+	if m != nil {
+		m.KeyEvent(uint16(args[0].Int()), args[1].Bool())
+	}
+	return nil
 }

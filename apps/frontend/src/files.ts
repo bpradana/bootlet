@@ -3,7 +3,7 @@
 // items dragged onto a folder (or a crumb) are moved, or copied with
 // Alt/Option; in Chrome and Edge a file can be dragged out to the desktop.
 // Its System tab shows live stats (system.ts).
-import type { AgentEntry } from "@bootlet/shared";
+import type { AgentEntry, EmulatorStats } from "@bootlet/shared";
 import { AgentClient, AgentError } from "./agent";
 import { initSystem } from "./system";
 
@@ -865,6 +865,6 @@ export function initFiles(opts: FilesOptions) {
       system.update();
     },
     /** Emulator stats from the worker, for the System tab. */
-    emulator: (mips: number, memMiB: number) => system.emulator(mips, memMiB),
+    emulator: (s: EmulatorStats) => system.emulator(s),
   };
 }

@@ -14,3 +14,4 @@ guest/disk.img
 dist-relay/
 apps/relay/site/*
 !apps/relay/site/README.md
+bench-results/

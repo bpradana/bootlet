@@ -4,6 +4,7 @@ import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { shellPrompt, type FromWorker, type NetState, type ToWorker, type VMState } from "@bootlet/shared";
 import { initFiles, pathsType, shellQuote } from "./files";
+import { initDisplay } from "./display";
 
 const statusEl = document.getElementById("status")!;
 const statusText = document.getElementById("status-text")!;
@@ -16,6 +17,27 @@ const netEl = document.getElementById("net")!;
 const params = new URLSearchParams(location.search);
 const memMiB = Number(params.get("mem")) || 0;
 const quiet = params.has("quiet");
+// ?display=0 boots without the graphical display.
+const withDisplay = params.get("display") !== "0";
+// ?splash=0 skips the power-on screen the emulator draws until Linux does.
+const splash = params.get("splash") !== "0";
+// ?deterministic derives guest time from the instruction count (benchmarks).
+const deterministic = params.has("deterministic");
+// ?engine=interp runs the plain interpreter instead of the decoded-block cache.
+const engine = params.get("engine") ?? "";
+
+// Hooks for the end-to-end tests and benchmarks (apps/frontend/bench).
+type Stats = Extract<FromWorker, { type: "stats" }>;
+const probe = {
+  stats: undefined as Stats | undefined,
+  times: {} as Record<string, number>, // performance.now() of state changes and the first prompt
+  waiting: [] as ((s: Stats) => void)[],
+  statsNow: () => new Promise<Stats>((resolve) => {
+    probe.waiting.push(resolve);
+    send({ type: "stats" });
+  }),
+};
+(globalThis as unknown as { __bootlet: typeof probe }).__bootlet = probe;
 
 // The network relay normally runs on the user's own computer (apps/relay).
 const LOCAL_RELAY = "ws://127.0.0.1:8089/";
@@ -77,11 +99,18 @@ fit.fit();
 new ResizeObserver(() => fit.fit()).observe(document.getElementById("terminal")!);
 
 const worker = new Worker(new URL("./worker.ts", import.meta.url), { type: "module" });
-const send = (msg: ToWorker) => worker.postMessage(msg);
+const send = (msg: ToWorker, transfer: Transferable[] = []) => worker.postMessage(msg, transfer);
 
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 term.onData((s) => send({ type: "input", data: encoder.encode(s) }));
+
+const screen = withDisplay ? initDisplay({ send, onHide: () => term.focus() }) : undefined;
+if (!withDisplay) {
+  document.getElementById("display-pane")!.hidden = true;
+  document.getElementById("display-splitter")!.hidden = true;
+  document.getElementById("display-toggle")!.hidden = true;
+}
 
 // File explorer: requests to the guest's file agent travel through the worker.
 const files = initFiles({
@@ -193,6 +222,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
         recent = (recent + decoder.decode(msg.data, { stream: true })).slice(-256);
         if (recent.includes(shellPrompt)) {
           booted = true;
+          probe.times.prompt = performance.now();
           render();
         }
       }
@@ -217,15 +247,21 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
     case "agent":
       files.client.feed(msg.data);
       break;
+    case "frame":
+      screen?.frame(msg.rects, msg.data);
+      break;
     case "stats":
       mips = msg.mips;
       emulatorMiB = msg.memMiB;
-      files.emulator(msg.mips, msg.memMiB);
+      files.emulator(msg);
+      probe.stats = msg;
+      for (const w of probe.waiting.splice(0)) w(msg);
       renderTooltip();
       render();
       break;
     case "state":
       state = msg.state;
+      probe.times[msg.state] = performance.now();
       if (state === "booting") {
         booted = false;
         recent = "";
@@ -403,7 +439,7 @@ netDisconnect.onclick = () => {
 netDialog.addEventListener("close", () => term.focus());
 
 function startMessage(): ToWorker {
-  return { type: "start", base: document.baseURI, relay, memMiB, quiet };
+  return { type: "start", base: document.baseURI, relay, memMiB, quiet, display: withDisplay, splash, deterministic, engine };
 }
 
 // Chrome's Memory Saver discards background tabs that use a lot of memory

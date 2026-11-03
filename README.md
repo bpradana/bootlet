@@ -54,6 +54,7 @@ Python 3.14.10 on riscv64
 - [Networking](#networking)
 - [Persistent storage](#persistent-storage)
 - [File explorer and system stats](#file-explorer-and-system-stats)
+- [Display, keyboard, and boot splash](#display-keyboard-and-boot-splash)
 - [Emulator API](#emulator-api)
 - [Performance](#performance)
 - [Deployment](#deployment)
@@ -71,8 +72,12 @@ Python 3.14.10 on riscv64
 | 📦 **A real package manager** | musl, BusyBox, and `apk` come preinstalled and registered in apk's database, so `apk add` pulls anything from Alpine's riscv64 repositories. |
 | 🌐 **Networking** | virtio-net plus a user-mode TCP/IP stack in Go (like QEMU's slirp). Guest connections travel as [Wisp](https://github.com/MercuryWorkshop/wisp-protocol) streams over a WebSocket to a relay running on your own computer, which also serves the site. |
 | 💾 **Persistent root filesystem** | The whole filesystem is an overlay on a 1 GiB sparse virtio disk, saved to the Origin Private File System (or IndexedDB). Only changed 4 KiB blocks are written. **Reset disk** restores the stock system. |
+| 🖼️ **Graphical display** | A 640×480 framebuffer, driven by the stock kernel's `simpledrm` (`/dev/fb0`, the framebuffer console), drawn on a canvas above the serial console. Only changed regions are copied. The serial console stays as it is. |
+| ⌨️ **Keyboard for the display** | A virtio keyboard with real key-down and key-up events, for games and the display's own shell on `tty1`. Held keys are released when the display loses focus. |
+| ✨ **Boot splash** | The emulator draws bootlet's power-on screen on the display until Linux draws its first pixel (no firmware involved). `?splash=0` turns it off. |
 | 📂 **File explorer** | A side panel browses the guest's whole filesystem. Drop files or folders from your computer to upload them, drag items onto folders to move them, and drag files out (Chrome, Edge) or double-click to download. |
 | 📊 **Live system stats** | The panel's System tab shows the guest's CPU, memory, storage, network, and top processes, plus the emulator's speed (MIPS) and memory, with a history graph. |
+| ⚡ **Decoded-block cache** | Straight-line runs of guest code are decoded once and cached (bounded, about 7 MiB), with exact instruction counts, precise traps, and invalidation on any write to cached code. In the browser it is about 25–75% faster than the plain interpreter, which remains the reference (`?engine=interp`). |
 | 💤 **Idles at idle** | When the guest executes `wfi`, the worker sleeps until the next timer event, keystroke, or network packet, so a VM at a prompt costs almost no CPU. |
 | 🧩 **No toolchain for the guest** | `guestpack` (pure Go) downloads and verifies pinned Alpine packages and packs the initramfs. The file explorer's guest agent is cross-compiled by Go itself. No cross compiler, Buildroot, or Docker is needed. |
 | 🖥️ **Native and WASM from one codebase** | The `machine` package drives both `cmd/bootlet` (a terminal runner with direct sockets) and `cmd/wasm` (the browser build). |
@@ -395,6 +400,46 @@ screen. Each poll costs the guest about 1.7M instructions, a few percent of its 
 browser speed. The agent itself shows up in the process list. It skips kernel threads,
 which are most of the guest's tasks and the expensive part to read.
 
+## Display, keyboard, and boot splash
+
+The display is separate from the serial console. Console bytes still go through the
+16550A UART to the terminal; pixels never do.
+
+- **Framebuffer.** With `Config.Display` the machine allocates a 640×480 `x8r8g8b8`
+  framebuffer right after RAM, in the same host slice. Guest pixel stores therefore take
+  the CPU's ordinary RAM fast path, with no per-store check. The device tree describes it
+  as a `simple-framebuffer` under `/chosen`, outside the memory node. Alpine's kernel
+  drives it with the built-in `simpledrm`, which gives `/dev/dri/card0`, `/dev/fb0`, and
+  the framebuffer console. No kernel option or module is needed. The console font is the
+  kernel's 8×8 (`fbcon=font:VGA8x8`, 80×60 characters).
+- **Presenting changes.** `Display.Flush` compares the framebuffer with a shadow copy in
+  64×16-pixel tiles and merges changed tiles into rectangles. It converts only those to
+  RGBA. Natively that costs about 46 µs when nothing changed and 0.6 ms for a full screen.
+  The worker flushes at most every 16 ms and draws the rectangles with `putImageData`
+  straight into the page's canvas, which it receives through
+  `transferControlToOffscreen`. Without OffscreenCanvas, it posts the rectangles to the
+  page instead. `simpledrm` flushes `write()`s to `/dev/fb0` at once, but `mmap()`ed
+  writes only on its deferred-I/O timer, so programs that need low latency should
+  `pwrite` their frames.
+- **Keyboard.** A virtio-input device (`0x1000_4000`, IRQ 4) reports Linux `KEY_*` codes
+  and appears as "bootlet keyboard" in `/dev/input/event0`. The `virtio_input` and `evdev`
+  modules are loaded at boot. The page sends keys only while the canvas has focus (click
+  it), never auto-repeats, and leaves Cmd/Meta shortcuts to the browser. It releases every
+  held key when the canvas or window loses focus, the tab is hidden, or the display is
+  closed. A shell runs on the display's console (`tty1`). Programs that want the keyboard
+  for themselves grab the device (`EVIOCGRAB`).
+- **Boot splash.** At reset, after the page's downloads (which keep their own progress
+  text), the emulator draws bootlet's power-on screen into the framebuffer: the `>_` mark,
+  a BIOS-style machine summary, and a sweeping bar with the time since reset. It animates
+  at 15 frames per second and redraws only the bar and status line. Before every frame it
+  checks that the framebuffer still holds exactly what it drew last. The first pixel the
+  guest changes (simpledrm/fbcon taking over, about 0.4 s natively and 2 s in the browser)
+  ends it for good, so it never covers guest output. Boot time with and without it is
+  within run-to-run noise.
+- **Page parameters.** `?display=0` boots without the display and keyboard, and
+  `?splash=0` skips the splash. The **Display** button hides the pane, and the splitter
+  resizes it.
+
 ## Emulator API
 
 The `machine` package is the whole public surface. The browser build exposes the same
@@ -425,7 +470,7 @@ for {
 
 | JavaScript (`globalThis.bootlet`) | Go |
 |---|---|
-| `create(ramMiB, cmdline)` | `machine.New` |
+| `create(ramMiB, cmdline, quiet, {display, splash, deterministic, engine})` | `machine.New` (with `AttachKeyboard` when `display` is set) |
 | `loadKernel(Uint8Array)`, `loadInitrd(Uint8Array)` | `LoadKernel`, `LoadInitrd` |
 | `attachDisk(sizeMiB, idx, data)`, `takeDirty()`, `resetDisk(sizeMiB)` | `AttachDisk`, `Disk.Restore`, `Disk.TakeDirty`, `ReplaceDisk` |
 | `attachNet()`, `netInput(packet)`, `netOutput()`, `netDisconnected()` | `AttachNet` with a `netstack.WispUpstream` |
@@ -433,6 +478,8 @@ for {
 | `reset()` | `Reset` |
 | `run(budgetMs)` → `{output, halted, idle, idleMs, instructions}` | `Run` + `Output` |
 | `input(Uint8Array)` | `Input` |
+| `displayFlush(out)` → `[x, y, w, h, offset]…`, `displayInvalidate()` | `Display.Flush`, `Display.Invalidate` |
+| `keyEvent(code, down)` | `KeyEvent` |
 
 The physical memory map follows QEMU's `virt` machine:
 
@@ -445,30 +492,86 @@ The physical memory map follows QEMU's `virt` machine:
 | `0x1000_1000` | virtio-mmio block device, IRQ 1 (when a disk is attached) |
 | `0x1000_2000` | virtio-mmio network device, IRQ 2 (when networking is attached) |
 | `0x1000_3000` | virtio-mmio console for the file agent, IRQ 3 (when the agent is attached) |
+| `0x1000_4000` | virtio-mmio keyboard (virtio-input), IRQ 4 (when the keyboard is attached) |
 | `0x8000_0000` | RAM (128 MiB by default, `?mem=256` in the page) |
+| `0x8000_0000` + RAM size | simple-framebuffer, 640×480 `x8r8g8b8` (with `Config.Display`) |
 
 ## Performance
 
-| | Shell prompt after | Speed while booting |
+Measured with `mise run bench:native` and `mise run bench:web` (5 runs each, medians;
+Apple Silicon, Chromium). Both benchmarks report two speeds. **Active** MIPS counts only
+the time spent executing guest code. **Wall** MIPS divides by elapsed time, so it also
+falls while the guest idles or the browser is busy elsewhere. *Deterministic boot* is
+the most repeatable figure: with `Config.Deterministic` (`?deterministic` in the page),
+guest time comes from the instruction count and the random seed and clock are fixed, so
+every run executes the same instruction stream. The workloads are guest shell commands:
+`md5sum` of 16 MiB, `gzip -1` of 2 MiB, and a 20,000-iteration shell loop.
+
+| Browser (WebAssembly) | Interpreter | Decoded-block cache |
 |---|---|---|
-| Native (Apple Silicon) | ~1.7 s | ~90–100 MIPS |
-| Browser (Chromium, WebAssembly) | ~9 s from page load, served locally | ~25–30 MIPS |
+| Deterministic boot | 9.4 s · 28.0 MIPS | 7.6 s · 34.6 MIPS (+24%) |
+| Boot to the shell prompt (wall) | 13.1 s · 26.5 MIPS | 10.2 s · 32.3 MIPS |
+| `md5sum` 16 MiB | 10.3 s · 32.3 MIPS | 5.8 s · 56.6 MIPS (+75%) |
+| `gzip -1` 2 MiB | 10.4 s · 30.4 MIPS | 7.3 s · 40.6 MIPS (+34%) |
+| Shell loop | 17.9 s · 26.7 MIPS | 13.4 s · 33.9 MIPS (+27%) |
 
-Measured with the boot log on, and with the persistent disk and networking attached,
-which load their drivers before `init`. Printing the log costs under 0.1 s. Package installs are CPU-bound (decompressing and writing files at
-emulated speed): `apk add lua5.4` takes about 10 s natively, and `apk add python3`
-(about 45 MB) takes about 3.5 minutes in the browser. Both are one-time costs, since the
-result persists.
+| Native | Interpreter | Decoded-block cache |
+|---|---|---|
+| Deterministic boot (245 M instructions) | 2.41 s · 101.5 MIPS | 2.05 s · 119.7 MIPS (+18%) |
+| Boot to the shell prompt (wall) | 3.04 s | 2.62 s |
+| `md5sum` 16 MiB | 1.89 s · 149.5 MIPS | 1.00 s · 279.1 MIPS (+87%) |
+| `gzip -1` 2 MiB | 1.78 s · 139.1 MIPS | 1.22 s · 199.4 MIPS (+43%) |
+| Shell loop | 3.94 s · 99.5 MIPS | 3.21 s · 121.0 MIPS (+22%) |
 
-Function calls are comparatively expensive in Go's WebAssembly output, so the hot path
-is built to avoid them:
+Speeds are active MIPS. The MIPS figures are measured; the times include the shell
+around each command. Browser boot times are from the "booting" state, after the downloads.
 
-- Instruction fetch is inlined into the run loop through a cache of the current code
-  page's host memory.
-- Loads and stores have inlined TLB-hit fast paths into the RAM slice.
-- Compressed instructions expand through a 64K-entry lookup table.
-- Opcodes dispatch through a dense jump table.
-- The clock is read once per 20,000 instructions.
+**Where the time went.** Profiling the interpreter (`go test -cpuprofile` on the
+benchmarks) put about three quarters of the time in the run loop and `exec`: fetching,
+expanding compressed instructions, extracting fields, and dispatching each instruction
+again every time it runs. Loads and stores took most of the rest. That justified decoding
+once.
+
+**The decoded-block cache** (`cpu/block.go`) turns straight-line runs of up to 64
+instructions into pre-decoded operations, keyed by physical address. The common
+integer, load/store, and branch operations run inline. Everything else (FP, M, AMO, CSR,
+system) goes through the interpreter's `exec`.
+
+- **Precise and identical.** Each instruction updates `instret` and, before anything
+  that can trap, the PC. A block stops at any control transfer, system or CSR
+  instruction, or trap. It also stops at its page end, at the run loop's instruction
+  budget (where timer ticks happen), and right after a memory access that leaves an
+  interrupt pending (MMIO side effects). Both engines therefore take every interrupt at
+  the same instruction.
+- **Translation.** A block is entered only through the current PC's fetch translation,
+  so satp writes, `sfence.vma`, and privilege changes need nothing extra. It never spans
+  two pages, since the next virtual page can map anywhere.
+- **Invalidation.** Pages holding decoded code are flagged. A CPU store to one (including
+  page-table A/D updates), any device DMA (virtio reports every guest buffer it touches),
+  SBI console reads, and the splash all drop that page's blocks, and reset drops
+  everything. Instruction fetch is thus always coherent with memory, which makes
+  `fence.i` a no-op. Linux issues it on every new executable mapping, so flushing there
+  had cost 860 full flushes per boot.
+- **Bounded.** A fixed 32K-entry table and a 256K-operation arena (about 6.8 MiB) are
+  allocated once. A full arena flushes everything, about 33 times per boot, with no
+  allocation on the hot path. Larger sizes gained about 3% more for twice the memory.
+- **The interpreter stays.** It is the reference and the fallback: `?engine=interp` in
+  the page, `Config.Engine = machine.EngineInterp` in Go. The riscv-tests run on both
+  engines, and `TestEngineLockstep` compares registers, PC, privilege, instruction count,
+  and memory after every slice of every test. `TestDeterministic` requires deterministic
+  Linux boots on both engines to reach the prompt after exactly the same number of
+  instructions with byte-identical memory. Dedicated tests cover self-modifying code
+  without `fence.i`, DMA invalidation, and blocks at page ends.
+- **Tradeoffs.** It costs about 6.8 MiB of memory, a page-flag check on every store, and
+  decoding on first execution. Code that writes to pages it also executes gets
+  re-decoded. Gains are largest in tight loops (`md5sum`) and smallest in boot, which
+  runs a lot of code once.
+
+The next step, translating hot blocks to WebAssembly, is scoped separately in
+[docs/jit-followup.md](docs/jit-followup.md).
+
+Package installs are CPU-bound (decompressing and writing files at emulated speed). They
+are one-time costs, since the result persists.
 
 Downloads total about 13 MB gzip: kernel 7.1 MB, initramfs 4.4 MB (half of it is
 `apk.static`), WASM 1 MB, and the page itself under 100 KB.
@@ -499,6 +602,7 @@ Windows into a GitHub release. The network menu links to `releases/latest`.
 | Go unit tests (CPU + riscv-tests, devices, netstack, Wisp, relay, guest tools) | `mise run emu:test` |
 | Native boot and crash tests (shell, HTTP through the stack, persistence across reboot, consistency after a simulated tab close) | `mise run emu:boot-test` (`BOOTLET_ONLINE=1` adds a real `apk add`) |
 | Browser end-to-end tests (Playwright; boot, Reset disk, relay networking) | `mise run web:e2e` |
+| Benchmarks, native · in Chromium (`BOOTLET_ENGINE=interp` · `BENCH_QUERY=engine=interp`; results in `bench-results/`) | `mise run bench:native` · `mise run bench:web` |
 | gofmt, vet, TypeScript typecheck | `mise run lint` |
 | Everything CI runs | `mise run test` |
 | Production build · relay image | `mise run build` · `mise run relay:docker` |
@@ -537,9 +641,11 @@ go run ./cmd/bootlet -kernel ../../guest/out/Image -initrd ../../guest/out/initr
 - **TCP and IPv4 only.** The guest can't send ICMP beyond the gateway, or UDP other than
   DNS. Wisp has no half-close, so a guest `shutdown(SHUT_WR)` keeps the remote side open
   until it closes.
-- **Serial console only.** There is no framebuffer or graphical display.
-- **Interpreter speed.** CPU-heavy work runs at tens of MIPS. A decoded-block cache, or
-  translating hot blocks to WebAssembly, would be the next step.
+- **Simple display.** One fixed resolution, with no GPU acceleration, mouse, or sound.
+  The display is a linear framebuffer, so software-rendered graphics only.
+- **Emulation speed.** CPU-heavy work runs at roughly 30–60 MIPS in the browser.
+  Translating hot blocks to WebAssembly is the next step
+  ([docs/jit-followup.md](docs/jit-followup.md)).
 - **Memory.** Guest RAM (`?mem=`, 128 MiB by default) is allocated up front. Disk
   contents are read on demand with OPFS but held in memory with the IndexedDB fallback,
   and downloads have no backpressure from the relay. WebAssembly memory never shrinks, so

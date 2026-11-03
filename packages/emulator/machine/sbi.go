@@ -66,6 +66,7 @@ func (m *Machine) sbi(c *cpu.CPU) {
 		}
 		m.sendIPI(a0, a1)
 	case extRFence:
+		// remote fence.i (fid 0) needs no work: see fence.i in cpu/exec.go.
 		c.FlushTLB()
 	case extHSM:
 		switch fid {
@@ -108,6 +109,7 @@ func (m *Machine) sbi(c *cpu.CPU) {
 				break
 			}
 			val = uint64(copy(b, m.UART.TakeInput(len(b))))
+			c.InvalidateRange(a1|a2<<32, val)
 		case 2: // write_byte
 			m.consolePrint([]byte{byte(a0)})
 		default:
@@ -135,7 +137,8 @@ func (m *Machine) legacy(c *cpu.CPU, eid, a0 uint64) int64 {
 		c.SetPending(cpu.IntSSI, false)
 	case 4:
 		m.CPU.SetPending(cpu.IntSSI, true)
-	case 5, 6, 7:
+	case 5: // remote fence.i: nothing to do (see fence.i in cpu/exec.go)
+	case 6, 7:
 		c.FlushTLB()
 	case 8:
 		m.halted = true

@@ -129,6 +129,7 @@ func (c *CPU) walk(va uint64, acc access, priv uint8) (page uint64, flags uint8,
 		}
 		if upd != pte {
 			binary.LittleEndian.PutUint64(c.RAM[off:], upd)
+			c.codeStore(off)
 		}
 		return (ppn | (va>>12)&mask) << 12, uint8(upd), true
 	}
@@ -262,6 +263,9 @@ func (c *CPU) store(va uint64, size int, v uint64) bool {
 		default:
 			binary.LittleEndian.PutUint64(r, v)
 		}
+		if c.blocks != nil {
+			c.codeStore(off)
+		}
 		return true
 	}
 	return c.storeSlow(va, size, v)
@@ -279,6 +283,7 @@ func (c *CPU) storeSlow(va uint64, size int, v uint64) bool {
 		var b [8]byte
 		binary.LittleEndian.PutUint64(b[:], v)
 		copy(c.RAM[off:], b[:size])
+		c.codeStore(off)
 		return true
 	}
 	if !c.Bus.Write(pa, size, v) {
@@ -303,7 +308,8 @@ func (c *CPU) storeSplit(va uint64, size int, v uint64) bool {
 	return true
 }
 
-// ReadPhys copies guest physical memory, for firmware calls such as SBI DBCN.
+// ReadPhys returns guest physical memory, for firmware calls such as SBI
+// DBCN. Callers that write into it must call InvalidateRange.
 func (c *CPU) ReadPhys(pa uint64, n int) ([]byte, bool) {
 	off := pa - c.RAMBase
 	if off >= uint64(len(c.RAM)) || off+uint64(n) > uint64(len(c.RAM)) {

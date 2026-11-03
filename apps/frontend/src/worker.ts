@@ -6,18 +6,23 @@
 // packets over a WebSocket, and the relay can change at any time. Bytes for
 // the guest's file agent (the file explorer) pass through unchanged.
 import "./vendor/wasm_exec.js";
-import { assets, type FromWorker, type ToWorker } from "@bootlet/shared";
+import { assets, display, type FromWorker, type ToWorker } from "@bootlet/shared";
 import { openStore, type BlockStore } from "./storage";
 
 const SLICE_MS = 12;
 const DISK_MIB = 1024; // sparse: only written blocks are stored
 const SAVE_INTERVAL_MS = 2000;
+const FRAME_MS = 16; // present display changes at most this often
 
 let api: BootletAPI | undefined;
 let baseURL = "";
 let relayURL = "";
 let memMiB = 0;
 let quiet = false;
+let withDisplay = false;
+let splash = false;
+let deterministic = false;
+let engine = "";
 let ws: WebSocket | undefined;
 let reconnectDelay = 1000;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -27,7 +32,18 @@ let idleTimer: ReturnType<typeof setTimeout> | undefined;
 let store: BlockStore | undefined;
 let saving: Promise<void> | undefined;
 let instructions = 0;
+let busyMs = 0; // time spent inside api.run since statsSince
+let frames = 0;
 let statsSince = performance.now();
+const totals = { instructions: 0, busyMs: 0, frames: 0 };
+
+// Display: the page's canvas (when it could be transferred) or "frame"
+// messages back to the page.
+let ctx: OffscreenCanvasRenderingContext2D | undefined;
+let postFrames = false;
+const screen = new Uint8Array(display.width * display.height * 4);
+let lastFrame = 0;
+let frameTimer: ReturnType<typeof setTimeout> | undefined;
 
 const post = (msg: FromWorker, transfer: Transferable[] = []) => postMessage(msg, transfer);
 
@@ -80,7 +96,7 @@ async function boot() {
   ]);
   void go.run(wasm.instance); // returns once Go's main blocks; the API is then registered
   api = (globalThis as unknown as { bootlet: BootletAPI }).bootlet;
-  api.create(memMiB, "", quiet);
+  api.create(memMiB, "", quiet, { display: withDisplay, splash, deterministic, engine });
   check(api.loadKernel(kernel));
   api.loadInitrd(initrd);
   const d = await disk;
@@ -191,21 +207,69 @@ function check(err: string | null) {
   if (err) throw new Error(err);
 }
 
+// present copies display changes to the canvas, at most every FRAME_MS; a
+// change made just before the guest idles is picked up by a timer.
+function present() {
+  if (!api || (!ctx && !postFrames)) return;
+  const now = performance.now();
+  if (now - lastFrame < FRAME_MS) {
+    frameTimer ??= setTimeout(() => {
+      frameTimer = undefined;
+      present();
+    }, FRAME_MS - (now - lastFrame));
+    return;
+  }
+  lastFrame = now;
+  const rects = api.displayFlush(screen);
+  if (!rects) return;
+  frames++;
+  totals.frames++;
+  if (ctx) {
+    for (let i = 0; i < rects.length; i += 5) {
+      const [x, y, w, h, off] = rects.subarray(i, i + 5);
+      ctx.putImageData(new ImageData(new Uint8ClampedArray(screen.buffer, off, w * h * 4), w, h), x, y);
+    }
+  } else {
+    const last = rects.length - 5;
+    const data = screen.slice(0, rects[last + 4] + rects[last + 2] * rects[last + 3] * 4);
+    post({ type: "frame", rects, data }, [data.buffer, rects.buffer]);
+  }
+}
+
+function postStats() {
+  if (!api) return;
+  const now = performance.now();
+  const secs = (now - statsSince) / 1000;
+  post({
+    type: "stats",
+    mips: instructions / secs / 1e6,
+    activeMips: busyMs > 0 ? instructions / busyMs / 1000 : 0,
+    fps: frames / secs,
+    memMiB: api.memory(),
+    totalInstructions: totals.instructions,
+    totalBusyMs: totals.busyMs,
+    totalFrames: totals.frames,
+  });
+  instructions = busyMs = frames = 0;
+  statsSince = now;
+}
+
 function slice() {
   if (!running || !api) return;
   idleTimer = undefined;
+  const t0 = performance.now();
   const r = api.run(SLICE_MS);
+  const dt = performance.now() - t0;
+  busyMs += dt;
+  totals.busyMs += dt;
+  totals.instructions += r.instructions;
   if (r.output.length > 0) post({ type: "output", data: r.output }, [r.output.buffer]);
   flushNet();
   const agent = api.agentOutput();
   if (agent) post({ type: "agent", data: agent }, [agent.buffer]);
+  present();
   instructions += r.instructions;
-  const now = performance.now();
-  if (now - statsSince > 1000) {
-    post({ type: "stats", mips: instructions / (now - statsSince) / 1000, memMiB: api.memory() });
-    instructions = 0;
-    statsSince = now;
-  }
+  if (performance.now() - statsSince > 1000) postStats();
   if (r.halted) {
     running = false;
     void save();
@@ -256,6 +320,10 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
         relayURL = msg.relay;
         memMiB = msg.memMiB;
         quiet = msg.quiet;
+        withDisplay = msg.display;
+        splash = msg.splash;
+        deterministic = msg.deterministic;
+        engine = msg.engine;
       }
       await start();
       break;
@@ -292,6 +360,25 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
       break;
     case "agent":
       api?.agentInput(msg.data);
+      wake();
+      break;
+    case "canvas":
+      ctx = msg.canvas.getContext("2d", { alpha: false }) ?? undefined;
+      api?.displayInvalidate();
+      present();
+      break;
+    case "frames":
+      postFrames = true;
+      break;
+    case "redraw":
+      api?.displayInvalidate();
+      present();
+      break;
+    case "stats":
+      postStats();
+      break;
+    case "key":
+      api?.keyEvent(msg.code, msg.down);
       wake();
       break;
   }

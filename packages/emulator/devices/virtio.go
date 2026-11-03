@@ -12,6 +12,11 @@ type Virtio struct {
 	// IRQ is called when the interrupt line changes.
 	IRQ func(level bool)
 
+	// Touch, if set, is told about every guest memory range the device
+	// accesses, so decoded copies of code there can be dropped (DMA writes
+	// bypass the CPU). Reads are reported too; that is harmless.
+	Touch func(pa, n uint64)
+
 	dev                    virtioDevice
 	devFeatSel, drvFeatSel uint32
 	drvFeatures            uint64
@@ -27,6 +32,11 @@ type virtioDevice interface {
 	config(off uint64) byte
 	// notify is called when the driver kicks queue q.
 	notify(q int)
+}
+
+// configWriter is implemented by devices with writable config space.
+type configWriter interface {
+	setConfig(off uint64, b byte)
 }
 
 type virtqueue struct {
@@ -109,7 +119,15 @@ func (v *Virtio) Read(off uint64, size int) (uint64, bool) {
 	return 0, true
 }
 
-func (v *Virtio) Write(off uint64, _ int, val uint64) bool {
+func (v *Virtio) Write(off uint64, size int, val uint64) bool {
+	if off >= 0x100 {
+		if w, ok := v.dev.(configWriter); ok {
+			for i := 0; i < size; i++ {
+				w.setConfig(off-0x100+uint64(i), byte(val>>(8*i)))
+			}
+		}
+		return true
+	}
 	x := uint32(val)
 	q := v.queue()
 	setLo := func(p *uint64) { *p = *p&^0xffffffff | uint64(x) }
@@ -176,6 +194,9 @@ func (v *Virtio) interrupt() {
 
 // mem returns the guest memory at physical address pa, or nil.
 func (v *Virtio) mem(pa, n uint64) []byte {
+	if v.Touch != nil {
+		v.Touch(pa, n)
+	}
 	off := pa - v.RAMBase
 	if off >= uint64(len(v.RAM)) || off+n > uint64(len(v.RAM)) {
 		return nil

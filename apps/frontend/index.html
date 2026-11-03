@@ -20,6 +20,10 @@
           <span class="dot"></span><span id="status-text">Starting…</span>
         </span>
         <button class="net" id="net" type="button" data-state="off" aria-haspopup="dialog">Network off</button>
+        <button class="files-btn" id="display-toggle" type="button" aria-pressed="true" aria-controls="display-pane" title="Show or hide the guest's graphical display">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2" /><path d="M8 20h8M12 16v4" /></svg>
+          Display
+        </button>
         <button class="files-btn" id="files-toggle" type="button" aria-pressed="false" aria-controls="files" title="Files and live system stats of the guest">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2z" /></svg>
           Files
@@ -30,7 +34,14 @@
       </div>
     </header>
     <div class="workspace">
-      <main id="terminal" aria-label="Serial console"></main>
+      <div class="console">
+        <section class="display-pane" id="display-pane" aria-label="Display">
+          <canvas id="display" tabindex="0" aria-label="Guest display. Click it to send keys to the guest."></canvas>
+          <p class="display-hint" id="display-hint" aria-hidden="true"><span class="off">Click the screen to type into it</span><span class="on">Keys go to the display · click the console to type there</span></p>
+        </section>
+        <div class="hsplitter" id="display-splitter" role="separator" aria-orientation="horizontal" aria-label="Resize display" tabindex="0"></div>
+        <main id="terminal" aria-label="Serial console"></main>
+      </div>
       <div class="splitter" id="files-splitter" role="separator" aria-orientation="vertical" aria-label="Resize file panel" tabindex="0" hidden></div>
       <aside class="files" id="files" aria-label="Side panel" hidden>
         <header class="files-head">

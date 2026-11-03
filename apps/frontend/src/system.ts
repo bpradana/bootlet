@@ -3,7 +3,7 @@
 // browser storage). The guest is polled every 2 s, only while the tab is on
 // screen: a poll costs the guest about 1.7M instructions (a few percent of
 // its CPU), and an idle machine stays idle otherwise.
-import type { GuestStats } from "@bootlet/shared";
+import type { EmulatorStats, GuestStats } from "@bootlet/shared";
 import type { AgentClient } from "./agent";
 
 const HISTORY = 60; // samples in each sparkline
@@ -155,7 +155,7 @@ export interface SystemView {
   /** Re-evaluates whether to poll (panel open, tab shown, guest ready). */
   update(): void;
   /** Emulator stats from the worker, once a second. */
-  emulator(mips: number, memMiB: number): void;
+  emulator(s: EmulatorStats): void;
 }
 
 export function initSystem(client: AgentClient, root: HTMLElement, visible: () => boolean, note: () => string): SystemView {
@@ -204,11 +204,23 @@ export function initSystem(client: AgentClient, root: HTMLElement, visible: () =
   const emu = card("Emulator");
   const emuSpark = sparkline(["s1"], 0, 1, ([v]) => `${v.toFixed(1)} MIPS`);
   const emuRows = el("dl", "kv");
+  const emuActive = el("dd");
+  const emuFps = el("dd");
   const emuMem = el("dd");
   const emuStore = el("dd", "", "—");
-  emuRows.append(el("dt", "", "Tab memory"), emuMem, el("dt", "", "Browser storage"), emuStore);
+  emuRows.append(
+    el("dt", "", "While executing"),
+    emuActive,
+    el("dt", "", "Display"),
+    emuFps,
+    el("dt", "", "Tab memory"),
+    emuMem,
+    el("dt", "", "Browser storage"),
+    emuStore,
+  );
   emu.sec.append(emuSpark.el, emuRows);
-  emu.value.title = "Million guest instructions per second";
+  emu.value.title = "Million guest instructions per wall-clock second (idle time included)";
+  emuActive.title = "Million guest instructions per second spent executing (excludes idle time)";
 
   const guestCards = [cpu.sec, mem.sec, disk.sec, net.sec, procs.sec];
   root.append(meta, msg, ...guestCards, emu.sec);
@@ -343,9 +355,12 @@ export function initSystem(client: AgentClient, root: HTMLElement, visible: () =
 
   return {
     update,
-    emulator(mips, memMiB) {
+    emulator({ mips, activeMips, fps, memMiB }) {
+      const fmt = (v: number) => (v < 10 ? v.toFixed(1) : String(Math.round(v)));
       emuSpark.push([mips]);
-      emu.value.textContent = `${mips < 10 ? mips.toFixed(1) : Math.round(mips)} MIPS`;
+      emu.value.textContent = `${fmt(mips)} MIPS`;
+      emuActive.textContent = activeMips > 0 ? `${fmt(activeMips)} MIPS` : "idle";
+      emuFps.textContent = `${fmt(fps)} frames/s`;
       emuMem.textContent = `${memMiB} MiB`;
       if (visible()) void estimate();
     },
