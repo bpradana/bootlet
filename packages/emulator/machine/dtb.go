@@ -2,6 +2,7 @@ package machine
 
 import (
 	"crypto/rand"
+	"fmt"
 
 	"bootlet/emulator/fdt"
 )
@@ -28,8 +29,25 @@ func (m *Machine) deviceTree(initrdStart, initrdEnd uint64) []byte {
 		chosen.Add("linux,initrd-start", fdt.U64(initrdStart)).
 			Add("linux,initrd-end", fdt.U64(initrdEnd))
 	}
+	if m.Display != nil {
+		// Linux creates a platform device for a simple-framebuffer under
+		// /chosen; simpledrm drives it (/dev/dri/card0, /dev/fb0, fbcon).
+		chosen.Add("#address-cells", fdt.U32(2)).
+			Add("#size-cells", fdt.U32(2)).
+			Add("ranges", fdt.Empty())
+		chosen.Child(fmt.Sprintf("framebuffer@%x", m.FBBase())).
+			Add("compatible", fdt.Str("simple-framebuffer")).
+			Add("reg", fdt.U64(m.FBBase(), FBSize)).
+			Add("width", fdt.U32(FBWidth)).
+			Add("height", fdt.U32(FBHeight)).
+			Add("stride", fdt.U32(FBStride)).
+			Add("format", fdt.Str("x8r8g8b8")).
+			Add("status", fdt.Str("okay"))
+	}
 	seed := make([]byte, 64)
-	rand.Read(seed)
+	if !m.cfg.Deterministic {
+		rand.Read(seed)
+	}
 	chosen.Add("rng-seed", seed)
 
 	root.Child("memory@80000000").
@@ -108,6 +126,14 @@ func (m *Machine) deviceTree(initrdStart, initrdEnd uint64) []byte {
 			Add("reg", fdt.U64(AgentBase, 0x1000)).
 			Add("interrupt-parent", fdt.U32(phandlePLIC)).
 			Add("interrupts", fdt.U32(AgentIRQ))
+	}
+
+	if m.Keyboard != nil {
+		soc.Child("virtio_mmio@10004000").
+			Add("compatible", fdt.Str("virtio,mmio")).
+			Add("reg", fdt.U64(InputBase, 0x1000)).
+			Add("interrupt-parent", fdt.U32(phandlePLIC)).
+			Add("interrupts", fdt.U32(InputIRQ))
 	}
 
 	return fdt.Encode(root, 0)

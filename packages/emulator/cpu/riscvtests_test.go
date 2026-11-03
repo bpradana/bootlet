@@ -1,6 +1,7 @@
 package cpu_test
 
 import (
+	"bytes"
 	"encoding/binary"
 	"os"
 	"path/filepath"
@@ -18,7 +19,28 @@ type nobus struct{}
 func (nobus) Read(uint64, int) (uint64, bool) { return 0, false }
 func (nobus) Write(uint64, int, uint64) bool  { return false }
 
+// TestRISCVTests runs the official tests on both execution engines.
 func TestRISCVTests(t *testing.T) {
+	files, _ := filepath.Glob(filepath.Join(testsDir, "*", "*"))
+	if len(files) == 0 {
+		t.Skip("riscv-tests not built; run `mise run emu:riscv-tests`")
+	}
+	for _, blocks := range []bool{false, true} {
+		engine := map[bool]string{false: "interp", true: "blocks"}[blocks]
+		for _, f := range files {
+			name := engine + "/" + filepath.Base(filepath.Dir(f)) + "-p-" + filepath.Base(f)
+			t.Run(name, func(t *testing.T) {
+				t.Parallel()
+				runTest(t, f, blocks)
+			})
+		}
+	}
+}
+
+// TestEngineLockstep runs every test on both engines side by side and
+// compares the complete architectural state (registers, PC, privilege,
+// instruction count, memory) after every slice of instructions.
+func TestEngineLockstep(t *testing.T) {
 	files, _ := filepath.Glob(filepath.Join(testsDir, "*", "*"))
 	if len(files) == 0 {
 		t.Skip("riscv-tests not built; run `mise run emu:riscv-tests`")
@@ -27,17 +49,35 @@ func TestRISCVTests(t *testing.T) {
 		name := filepath.Base(filepath.Dir(f)) + "-p-" + filepath.Base(f)
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
-			runTest(t, f)
+			a, ramA, tohost := load(t, f)
+			b, ramB, _ := load(t, f)
+			b.UseBlocks(true)
+			for step := 0; step < 20000; step++ {
+				n := 1 + step%53 // vary slice boundaries
+				a.Run(n)
+				b.Run(n)
+				if a.X != b.X || a.F != b.F || a.PC != b.PC || a.Priv != b.Priv || a.Cycles != b.Cycles {
+					t.Fatalf("after %d instructions: interp pc=%#x priv=%d x=%x\nblocks pc=%#x priv=%d x=%x",
+						a.Cycles, a.PC, a.Priv, a.X, b.PC, b.Priv, b.X)
+				}
+				if !bytes.Equal(ramA, ramB) {
+					t.Fatalf("memory differs after %d instructions (pc=%#x)", a.Cycles, a.PC)
+				}
+				if binary.LittleEndian.Uint64(ramA[tohost-base:]) != 0 {
+					return
+				}
+			}
 		})
 	}
 }
 
-func runTest(t *testing.T, path string) {
+const base = 0x80000000
+
+func load(t *testing.T, path string) (*cpu.CPU, []byte, uint64) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	const base = 0x80000000
 	ram := make([]byte, 4<<20)
 	e, err := boot.LoadELF(ram, base, data)
 	if err != nil {
@@ -49,6 +89,12 @@ func runTest(t *testing.T, path string) {
 	}
 	c := cpu.New(ram, base, nobus{})
 	c.Reset(e.Entry)
+	return c, ram, tohost
+}
+
+func runTest(t *testing.T, path string, blocks bool) {
+	c, ram, tohost := load(t, path)
+	c.UseBlocks(blocks)
 	for i := 0; i < 1000; i++ {
 		c.Run(10000)
 		if v := binary.LittleEndian.Uint64(ram[tohost-base:]); v != 0 {

@@ -8,7 +8,7 @@ declare module "*/wasm_exec.js";
 
 /** The API registered by packages/emulator/cmd/wasm. */
 interface BootletAPI {
-  create(ramMiB: number, cmdline: string, quiet: boolean): void;
+  create(ramMiB: number, cmdline: string, quiet: boolean, opts?: { display: boolean; splash: boolean; deterministic: boolean; engine: string }): void;
   loadKernel(image: Uint8Array): string | null;
   loadInitrd(cpio: Uint8Array): void;
   reset(): string | null;
@@ -40,6 +40,12 @@ interface BootletAPI {
   attachAgent(): void;
   agentInput(data: Uint8Array): void;
   agentOutput(): Uint8Array<ArrayBuffer> | null;
+  /** Copies changed display regions into out (RGBA, a whole screen's worth);
+   * returns them as [x, y, w, h, offset] quintuples, or null if none changed. */
+  displayFlush(out: Uint8Array): Int32Array | null;
+  displayInvalidate(): void;
+  /** A key press or release on the virtio keyboard (Linux KEY_* code). */
+  keyEvent(code: number, down: boolean): void;
 }
 
 interface ImportMetaEnv {

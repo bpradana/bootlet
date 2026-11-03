@@ -109,6 +109,9 @@ type CPU struct {
 
 	itlb [tlbSize]tlbEntry
 	dtlb [tlbSize]tlbEntry
+
+	blocks    *blockCache // decoded blocks (see block.go); kept across Reset
+	blockMode bool
 }
 
 func New(ram []byte, ramBase uint64, bus Bus) *CPU {
@@ -119,8 +122,9 @@ func New(ram []byte, ramBase uint64, bus Bus) *CPU {
 
 // Reset puts the hart in M-mode at pc with all state cleared.
 func (c *CPU) Reset(pc uint64) {
-	ram, base, bus, ecall := c.RAM, c.RAMBase, c.Bus, c.Ecall
-	*c = CPU{RAM: ram, RAMBase: base, Bus: bus, Ecall: ecall}
+	ram, base, bus, ecall, blocks, mode := c.RAM, c.RAMBase, c.Bus, c.Ecall, c.blocks, c.blockMode
+	*c = CPU{RAM: ram, RAMBase: base, Bus: bus, Ecall: ecall, blocks: blocks, blockMode: mode}
+	c.FlushBlocks()
 	c.PC = pc
 	c.Priv = PrivM
 	c.mstatus = 2<<32 | 2<<34 // UXL = SXL = 64
@@ -165,6 +169,9 @@ func (c *CPU) EnterSupervisor(pc uint64) {
 // comparatively expensive under WebAssembly, so the common case of fetching
 // from the current page costs no call at all.
 func (c *CPU) Run(n int) int {
+	if c.blockMode {
+		return c.runBlocks(n)
+	}
 	for i := 0; i < n; i++ {
 		if c.mip&c.mie != 0 {
 			c.WFI = false

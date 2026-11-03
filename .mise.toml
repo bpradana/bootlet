@@ -70,7 +70,7 @@ run = "docker build -f apps/relay/Dockerfile -t bootlet-relay ."
 description = "Boot the guest natively and run shell commands against it"
 depends = ["guest:fetch"]
 dir = "packages/emulator"
-run = "go test -tags boot -run 'TestBoot|TestCrashConsistency|TestAgent' -v -timeout 15m ./machine"
+run = "go test -tags boot -run 'TestBoot|TestCrashConsistency|TestAgent|TestDisplay|TestKeyboard|TestSplash|TestDeterministic' -v -timeout 30m ./machine"
 
 [tasks."wasm:build"]
 description = "Compile the emulator to WebAssembly for the frontend"
@@ -105,6 +105,18 @@ description = "Playwright end-to-end boot test against the production build"
 depends = ["build"]
 dir = "apps/frontend"
 run = ["pnpm exec playwright install chromium", "pnpm exec playwright test"]
+
+[tasks."bench:native"]
+description = "Native benchmarks: boot, deterministic boot and fixed guest workloads (BOOTLET_BENCH_RUNS, BOOTLET_ENGINE); results in bench-results/"
+depends = ["guest:fetch"]
+dir = "packages/emulator"
+run = "mkdir -p ../../bench-results && BOOTLET_BENCH=1 BOOTLET_BENCH_OUT=$PWD/../../bench-results/native${BOOTLET_ENGINE:+-$BOOTLET_ENGINE}.json go test -tags boot -run TestBench -v -timeout 60m ./machine"
+
+[tasks."bench:web"]
+description = "Browser benchmarks in Chromium: active vs wall MIPS, boot, fixed workloads (BENCH_RUNS, BENCH_QUERY, BENCH_LABEL); results in bench-results/"
+depends = ["build"]
+dir = "apps/frontend"
+run = ["pnpm exec playwright install chromium", "pnpm exec playwright test -c bench/playwright.config.ts"]
 
 [tasks.lint]
 description = "gofmt + go vet + TypeScript typecheck"

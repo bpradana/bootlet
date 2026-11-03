@@ -194,6 +194,9 @@ func (c *CPU) exec(insn uint32, pc uint64, length uint64) {
 			c.illegal(insn, length)
 			return
 		}
+		// fence.i needs no work: decoded blocks are dropped as soon as their
+		// memory is written (by the CPU or by DMA), so instruction fetch
+		// always sees earlier stores, with or without fence.i.
 	case 0x73 >> 2:
 		if !c.system(insn, pc, &next, rd, rs1, f3) {
 			if c.PC == pc { // not already trapped

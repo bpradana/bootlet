@@ -1,5 +1,8 @@
 ::sysinit:/etc/init.d/rcS
 ttyS0::respawn:-/bin/sh
+# A second shell on the graphical display (fbcon on tty1), typed into with the
+# display's keyboard. Without a display it just sleeps.
+tty1::respawn:/bin/sh -c 'if [ -e /dev/fb0 ]; then exec /bin/sh -l; else exec sleep 2147483647; fi'
 ::respawn:/sbin/bootlet-agent
 ::ctrlaltdel:/sbin/reboot
 ::shutdown:/etc/init.d/rcK

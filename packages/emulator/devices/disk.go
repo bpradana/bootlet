@@ -398,3 +398,23 @@ func setBits(b []byte, from, to uint32) {
 		b[i/8] |= 1 << (i % 8)
 	}
 }
+
+// Clone returns an independent copy of an in-memory disk (one without a
+// backing), e.g. to boot several machines from identical disks.
+func (d *Disk) Clone() *Disk {
+	c := NewDisk(d.size)
+	for idx, b := range d.blocks {
+		c.blocks[idx] = append([]byte(nil), b...)
+	}
+	for idx, b := range d.dirty {
+		c.dirty[idx] = append([]byte(nil), b...)
+	}
+	for _, p := range d.pending {
+		m := map[uint64][]byte{}
+		for idx, b := range p {
+			m[idx] = append([]byte(nil), b...)
+		}
+		c.pending = append(c.pending, m)
+	}
+	return c
+}
