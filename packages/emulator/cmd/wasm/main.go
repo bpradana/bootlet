@@ -74,9 +74,10 @@ func bytesFrom(v js.Value) []byte {
 	return b
 }
 
-// create(ramMiB: number, cmdline: string, quiet: boolean, opts?: {display, splash})
+// create(ramMiB: number, cmdline: string, quiet: boolean, opts?: {display, displayDevice, splash, deterministic, engine})
 // An empty cmdline uses the default; quiet hides the kernel's boot log;
-// display adds the framebuffer; splash shows the power-on screen on it.
+// display adds the display, driven by displayDevice ("simplefb" or
+// "virtio-gpu"); splash shows the power-on screen on it.
 func create(_ js.Value, args []js.Value) any {
 	cfg := machine.Config{Cmdline: machine.DefaultCmdline}
 	if len(args) > 0 && args[0].Truthy() {
@@ -90,6 +91,9 @@ func create(_ js.Value, args []js.Value) any {
 	}
 	if len(args) > 3 && args[3].Truthy() {
 		cfg.Display = args[3].Get("display").Truthy()
+		if d := args[3].Get("displayDevice"); d.Truthy() {
+			cfg.DisplayDevice = d.String()
+		}
 		cfg.Splash = args[3].Get("splash").Truthy()
 		cfg.Deterministic = args[3].Get("deterministic").Truthy()
 		if e := args[3].Get("engine"); e.Truthy() {

@@ -1,6 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
 
-type Stats = { mips: number; activeMips: number; fps: number; engine: { engine: string; compiled: number } };
+type Stats = {
+  mips: number;
+  activeMips: number;
+  fps: number;
+  engine: { engine: string; compiled: number };
+  display: { device: string; renderer: string };
+};
 const stats = (page: Page) => page.evaluate(() => (globalThis as unknown as { __bootlet: { stats?: Stats } }).__bootlet.stats);
 
 async function bootToPrompt(page: Page) {
@@ -49,9 +55,31 @@ test("the display shows the splash, then Linux, and takes keyboard input", async
 
   const s = await stats(page);
   expect(s?.activeMips ?? 0).toBeGreaterThan(0);
-  // The browser runs guest code with the WebAssembly JIT by default.
+  // The browser runs guest code with the WebAssembly JIT by default, and
+  // draws the simple-framebuffer with WebGPU.
   expect(s?.engine.engine).toBe("jit");
   expect(s?.engine.compiled ?? 0).toBeGreaterThan(0);
+  expect(s?.display).toEqual({ device: "simplefb", renderer: "webgpu" });
+});
+
+test("a virtio-gpu display drawn with a 2D canvas shows the splash, then Linux", async ({ page }, info) => {
+  await page.goto("./?relay=&display=virtio-gpu&renderer=2d");
+  const display = page.locator("#display");
+  await expect.poll(async () => (await stats(page))?.fps ?? 0, { timeout: 120_000 }).toBeGreaterThan(0);
+  const splash = await display.screenshot({ path: info.outputPath("splash.png") });
+
+  const screen = await bootToPrompt(page);
+  await display.click();
+  await page.keyboard.type("echo hello from virtio-gpu\n");
+  await page.waitForTimeout(1500);
+  const typed = await display.screenshot({ path: info.outputPath("console.png") });
+  expect(typed.equals(splash)).toBe(false);
+
+  await page.locator(".xterm").click();
+  await page.keyboard.type("cat /sys/class/graphics/fb0/name; echo do''ne\n");
+  await expect(screen).toContainText("done");
+  await expect(screen).toContainText("virtio_gpudrmfb");
+  expect((await stats(page))?.display).toEqual({ device: "virtio-gpu", renderer: "2d" });
 });
 
 test("the display can be turned off", async ({ page }) => {

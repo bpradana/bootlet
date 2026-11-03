@@ -358,12 +358,15 @@ export function initSystem(client: AgentClient, root: HTMLElement, visible: () =
 
   return {
     update,
-    emulator({ mips, activeMips, fps, memMiB, engine }) {
+    emulator({ mips, activeMips, fps, memMiB, engine, display }) {
       const fmt = (v: number) => (v < 10 ? v.toFixed(1) : String(Math.round(v)));
       emuSpark.push([mips]);
       emu.value.textContent = `${fmt(mips)} MIPS`;
       emuActive.textContent = activeMips > 0 ? `${fmt(activeMips)} MIPS` : "idle";
-      emuFps.textContent = `${fmt(fps)} frames/s`;
+      emuFps.textContent =
+        display.device === "none"
+          ? "off"
+          : `${fmt(fps)} frames/s · ${display.device === "virtio-gpu" ? "virtio-gpu" : "framebuffer"} · ${display.renderer === "webgpu" ? "WebGPU" : "2D canvas"}`;
       emuEngine.textContent =
         engine.engine === "jit"
           ? `WebAssembly JIT · ${engine.compiled.toLocaleString()} blocks compiled`

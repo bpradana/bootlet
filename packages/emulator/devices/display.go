@@ -19,6 +19,9 @@ type Display struct {
 	rects  []Rect
 	dirty  []bool // per tile, for the current flush
 	full   bool   // next flush resends everything
+	// With tracked set (a framebuffer in host memory), only writers that
+	// call Damage change fb, so Flush skips the comparison when none did.
+	tracked, changed bool
 
 	// Frames and Bytes count flushes that changed something and the RGBA
 	// bytes they produced, for statistics.
@@ -44,6 +47,17 @@ func NewDisplay(fb []byte, width, height, stride int) *Display {
 	return d
 }
 
+// NewHostDisplay returns a display with its own framebuffer in host memory
+// (x8r8g8b8, no row padding), written by a device rather than the guest.
+func NewHostDisplay(width, height int) *Display {
+	d := NewDisplay(make([]byte, width*height*4), width, height, width*4)
+	d.tracked = true
+	return d
+}
+
+// Damage tells a tracked display that its framebuffer was written.
+func (d *Display) Damage() { d.changed = true }
+
 func (d *Display) tilesX() int { return (d.Width + tileW - 1) / tileW }
 func (d *Display) tilesY() int { return (d.Height + tileH - 1) / tileH }
 
@@ -58,6 +72,10 @@ func (d *Display) Invalidate() { d.full = true }
 // pixels converted to RGBA (alpha 255), or nil if nothing changed. The data
 // is only valid until the next call.
 func (d *Display) Flush() ([]Rect, []byte) {
+	if d.tracked && !d.changed && !d.full {
+		return nil, nil
+	}
+	d.changed = false
 	tx, ty := d.tilesX(), d.tilesY()
 	any := false
 	for y := 0; y < ty; y++ {

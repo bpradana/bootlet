@@ -17,8 +17,13 @@ const netEl = document.getElementById("net")!;
 const params = new URLSearchParams(location.search);
 const memMiB = Number(params.get("mem")) || 0;
 const quiet = params.has("quiet");
-// ?display=0 boots without the graphical display.
-const withDisplay = params.get("display") !== "0";
+// ?display=0 boots without the graphical display; ?display=virtio-gpu drives
+// it with a virtio-gpu instead of a simple-framebuffer.
+const displayParam = params.get("display") ?? "";
+const withDisplay = displayParam !== "0";
+const displayDevice = displayParam === "virtio-gpu" ? displayParam : "";
+// ?renderer=2d draws the display with a 2D canvas instead of WebGPU.
+const renderer = params.get("renderer") ?? "";
 // ?splash=0 skips the power-on screen the emulator draws until Linux does.
 const splash = params.get("splash") !== "0";
 // ?deterministic derives guest time from the instruction count (benchmarks).
@@ -105,7 +110,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 term.onData((s) => send({ type: "input", data: encoder.encode(s) }));
 
-const screen = withDisplay ? initDisplay({ send, onHide: () => term.focus() }) : undefined;
+const screen = withDisplay ? initDisplay({ send, onHide: () => term.focus(), renderer }) : undefined;
 if (!withDisplay) {
   document.getElementById("display-pane")!.hidden = true;
   document.getElementById("display-splitter")!.hidden = true;
@@ -249,6 +254,9 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       break;
     case "frame":
       screen?.frame(msg.rects, msg.data);
+      break;
+    case "displayFallback":
+      screen?.fallback();
       break;
     case "stats":
       mips = msg.mips;
@@ -439,7 +447,7 @@ netDisconnect.onclick = () => {
 netDialog.addEventListener("close", () => term.focus());
 
 function startMessage(): ToWorker {
-  return { type: "start", base: document.baseURI, relay, memMiB, quiet, display: withDisplay, splash, deterministic, engine };
+  return { type: "start", base: document.baseURI, relay, memMiB, quiet, display: withDisplay, displayDevice, splash, deterministic, engine };
 }
 
 // Chrome's Memory Saver discards background tabs that use a lot of memory

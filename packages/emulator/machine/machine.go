@@ -29,6 +29,8 @@ const (
 	AgentIRQ  = 3
 	InputBase = 0x1000_4000
 	InputIRQ  = 4
+	GPUBase   = 0x1000_5000
+	GPUIRQ    = 5
 	RTCBase   = 0x0010_1000
 
 	// TimebaseHz is the frequency of the time CSR.
@@ -53,9 +55,14 @@ const (
 type Config struct {
 	RAMSize uint64 // bytes; DefaultRAM if zero
 	Cmdline string // DefaultCmdline if empty
-	// Display adds a framebuffer (FBWidth x FBHeight) after RAM, described
-	// to the guest as a simple-framebuffer.
+	// Display adds a FBWidth x FBHeight display, driven by the device that
+	// DisplayDevice selects.
 	Display bool
+	// DisplayDevice is DisplayFramebuffer (the default): a framebuffer
+	// after RAM, described to the guest as a simple-framebuffer (simpledrm);
+	// or DisplayVirtioGPU: a 2D virtio-gpu, which tells the host exactly
+	// what changed and keeps the pixels out of guest-visible memory.
+	DisplayDevice string
 	// Splash draws bootlet's power-on screen on the display at reset, until
 	// the guest draws its own output.
 	Splash bool
@@ -70,6 +77,11 @@ type Config struct {
 	// EngineInterp is the plain interpreter, kept as the reference.
 	Engine string
 }
+
+const (
+	DisplayFramebuffer = "simplefb"
+	DisplayVirtioGPU   = "virtio-gpu"
+)
 
 const (
 	EngineBlocks = "blocks"
@@ -112,8 +124,10 @@ type Machine struct {
 	Keyboard *devices.VirtioInput   // nil unless AttachKeyboard was called
 	// Display is the framebuffer, nil unless Config.Display is set.
 	Display *devices.Display
-	stack   *netstack.Stack
-	bus     devices.Bus
+	// GPU drives Display with Config.DisplayDevice DisplayVirtioGPU.
+	GPU   *devices.VirtioGPU
+	stack *netstack.Stack
+	bus   devices.Bus
 
 	kernel, initrd []byte
 
@@ -140,15 +154,18 @@ func New(cfg Config) *Machine {
 		// leaves 40x15 characters on 640x480; 8x8 gives 80x60.
 		cfg.Cmdline += " " + DisplayCmdline
 	}
+	gpu := cfg.Display && cfg.DisplayDevice == DisplayVirtioGPU
 	size := cfg.RAMSize
-	if cfg.Display {
+	if cfg.Display && !gpu {
 		// The framebuffer lives in the same host slice as RAM, so the guest's
 		// pixel stores take the CPU's RAM fast path. The device tree's memory
 		// node covers RAMSize only, so the kernel never allocates from it.
 		size += FBSize
 	}
 	m := &Machine{cfg: cfg, RAM: make([]byte, size)}
-	if cfg.Display {
+	if gpu {
+		m.Display = devices.NewHostDisplay(FBWidth, FBHeight)
+	} else if cfg.Display {
 		m.Display = devices.NewDisplay(m.RAM[cfg.RAMSize:cfg.RAMSize+FBStride*FBHeight], FBWidth, FBHeight, FBStride)
 	}
 	m.UART = devices.NewUART()
@@ -182,6 +199,12 @@ func New(cfg Config) *Machine {
 		}
 	}
 	m.CLINT.Update = m.tick
+	if gpu {
+		m.GPU = devices.NewVirtioGPU(m.Display, m.RAM, RAMBase)
+		m.GPU.IRQ = func(level bool) { m.PLIC.SetLevel(GPUIRQ, level) }
+		m.GPU.Touch = m.CPU.InvalidateRange
+		m.bus.Map(GPUBase, 0x1000, m.GPU)
+	}
 	return m
 }
 
@@ -290,6 +313,9 @@ func (m *Machine) Reset() error {
 	clear(m.RAM)
 	m.splash, m.handover = nil, 0
 	if m.Display != nil {
+		if m.GPU != nil {
+			clear(m.Display.Framebuffer())
+		}
 		m.Display.Invalidate()
 		if m.cfg.Splash {
 			m.splash = devices.NewSplash(m.Display, fmt.Sprintf("RV64GC  %d MIB RAM  %dX%d DISPLAY",
@@ -334,6 +360,9 @@ func (m *Machine) Reset() error {
 	if m.Keyboard != nil {
 		m.Keyboard.Reset()
 	}
+	if m.GPU != nil {
+		m.GPU.Reset()
+	}
 	m.start = time.Now()
 	m.skipped = 0
 	m.sbiTimer = ^uint64(0)
@@ -346,7 +375,8 @@ func (m *Machine) Reset() error {
 	return nil
 }
 
-// FBBase is the guest physical address of the framebuffer.
+// FBBase is the guest physical address of the framebuffer (with
+// DisplayFramebuffer).
 func (m *Machine) FBBase() uint64 { return RAMBase + m.cfg.RAMSize }
 
 // now returns the current value of the time CSR.
@@ -396,7 +426,9 @@ func (m *Machine) animateSplash() {
 	}
 	m.splashNext = t + splashFrame
 	drew := m.splash.Tick(time.Duration(t) * (1e9 / TimebaseHz))
-	m.CPU.InvalidateRange(m.FBBase(), FBSize) // the splash writes guest memory
+	if m.GPU == nil {
+		m.CPU.InvalidateRange(m.FBBase(), FBSize) // the splash writes guest memory
+	}
 	if !drew {
 		m.handover = time.Duration(t) * (1e9 / TimebaseHz)
 		m.splash = nil
