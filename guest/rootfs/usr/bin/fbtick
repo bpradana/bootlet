@@ -1,0 +1,52 @@
+#!/bin/sh
+# fbtick [fps] [seconds]: display-pipeline diagnostic. Writes numbered frames
+# to /dev/fb0 at about fps per second, each with one write() of 640x400
+# pixels, as the Doom port does. Each frame has a stamp strip at its top
+# (rows 0-7) and its bottom (rows 392-399) carrying the same 4-bit number;
+# the emulator's display trace (packages/emulator/devices/display_trace.go)
+# decodes them to tell complete frames from frames caught mid-copy.
+fps=${1:-10}
+secs=${2:-10}
+stride=2560 cell=40
+dir=/tmp/fbtick
+fb=/dev/fb0
+[ -c $fb ] || { echo 'fbtick: no /dev/fb0' >&2; exit 1; }
+# Keep fbcon's blinking cursor off the stamps.
+echo 0 > /sys/class/graphics/fbcon/cursor_blink 2>/dev/null
+
+fill() { head -c "$1" /dev/zero | tr '\000' "\\$(printf %03o "$2")"; }
+
+mkdir -p $dir
+fill $((cell * 4)) 255 > $dir/white
+fill $((cell * 4)) 0 > $dir/black
+seq=0
+while [ $seq -lt 16 ]; do
+    f=$dir/$seq
+    if [ ! -s $f ]; then
+        v=$((0xa5 | seq << 8 | (seq ^ 15) << 12))
+        i=0
+        : > $dir/row
+        while [ $i -lt 16 ]; do
+            if [ $((v >> i & 1)) = 1 ]; then cat $dir/white; else cat $dir/black; fi >> $dir/row
+            i=$((i + 1))
+        done
+        for r in 1 2 3 4 5 6 7 8; do cat $dir/row; done > $dir/stamp
+        { cat $dir/stamp; fill $((384 * stride)) $((seq * 8 + 40)); cat $dir/stamp; } > $f.tmp && mv $f.tmp $f
+    fi
+    seq=$((seq + 1))
+done
+
+up() { read -r t _ < /proc/uptime; echo "${t%.*}${t#*.}"; } # centiseconds
+period=$((1000000 / fps))
+n=$((fps * secs))
+t0=$(up)
+i=0
+while [ $i -lt $n ]; do
+    dd if=$dir/$((i % 16)) of=$fb bs=$((400 * stride)) count=1 2>/dev/null
+    i=$((i + 1))
+    # Sleep until frame i is due.
+    late=$(( ($(up) - t0) * 10000 - i * period ))
+    [ $late -lt 0 ] && usleep $(( -late ))
+done
+t1=$(up)
+echo "fbtick: wrote $n frames in $(( (t1 - t0) / 100 )).$(( (t1 - t0) % 100 / 10 ))s ($(( n * 1000 / (t1 - t0 + (t1 == t0)) / 10 )) fps)"

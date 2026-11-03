@@ -55,6 +55,8 @@ func main() {
 	api.Set("agentOutput", js.FuncOf(agentOutput))
 	api.Set("displayFlush", js.FuncOf(displayFlush))
 	api.Set("displayInvalidate", js.FuncOf(displayInvalidate))
+	api.Set("displayTrace", js.FuncOf(displayTrace))
+	api.Set("displayTraceStats", js.FuncOf(displayTraceStats))
 	api.Set("keyEvent", js.FuncOf(keyEvent))
 	api.Set("engineStats", js.FuncOf(engineStats))
 	js.Global().Set("bootlet", api)
@@ -349,6 +351,49 @@ func displayInvalidate(js.Value, []js.Value) any {
 		m.Display.Invalidate()
 	}
 	return nil
+}
+
+// displayTrace(on: boolean) starts or stops recording what each displayFlush
+// sees (diagnostics; see devices.DisplayTrace).
+func displayTrace(_ js.Value, args []js.Value) any {
+	if m != nil && m.Display != nil {
+		m.Display.Trace = nil
+		if args[0].Bool() {
+			m.Display.Trace = devices.NewDisplayTrace(4096)
+		}
+	}
+	return nil
+}
+
+// displayTraceStats(): object | null returns the display trace's counters
+// since tracing started, and the per-flush records since the last call as
+// a Float64Array of [atMs, tiles, minY, maxY, top, bottom, gpuFlushes] rows.
+func displayTraceStats(js.Value, []js.Value) any {
+	if m == nil || m.Display == nil || m.Display.Trace == nil {
+		return nil
+	}
+	t := m.Display.Trace
+	recs, dropped := t.TakeRecords()
+	arr := js.Global().Get("Float64Array").New(7 * len(recs))
+	for i, r := range recs {
+		for j, v := range []float64{float64(r.At.Microseconds()) / 1000, float64(r.Tiles), float64(r.MinY), float64(r.MaxY), float64(r.Top), float64(r.Bottom), float64(r.GPUFlushes)} {
+			arr.SetIndex(7*i+j, v)
+		}
+	}
+	return map[string]any{
+		"sinceMs":      float64(t.Since().Microseconds()) / 1000,
+		"calls":        float64(t.Calls),
+		"changed":      float64(t.Changed),
+		"fullChanges":  float64(t.FullChanges),
+		"dirtyTiles":   float64(t.DirtyTiles),
+		"complete":     float64(t.Complete),
+		"torn":         float64(t.Torn),
+		"skipped":      float64(t.Skipped),
+		"gpuFlushes":   float64(t.GPUFlushes),
+		"gpuTransfers": float64(t.GPUTransfers),
+		"dropped":      float64(dropped),
+		"records":      arr,
+	}
 }
 
 // keyEvent(code: number, down: boolean) presses or releases a key on the

@@ -47,6 +47,9 @@ interface BootletAPI {
    * returns them as [x, y, w, h, offset] quintuples, or null if none changed. */
   displayFlush(out: Uint8Array): Int32Array | null;
   displayInvalidate(): void;
+  /** Diagnostics: record what each displayFlush sees. */
+  displayTrace(on: boolean): void;
+  displayTraceStats(): (Record<string, number> & { records: Float64Array }) | null;
   /** A key press or release on the virtio keyboard (Linux KEY_* code). */
   keyEvent(code: number, down: boolean): void;
   /** How guest code runs: "interp", "blocks" or "jit", with JIT counters. */

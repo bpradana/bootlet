@@ -55,25 +55,22 @@ test("the display shows the splash, then Linux, and takes keyboard input", async
 
   const s = await stats(page);
   expect(s?.activeMips ?? 0).toBeGreaterThan(0);
-  // The browser runs guest code with the WebAssembly JIT by default. The
-  // display is drawn with WebGPU where the browser can keep a GPU device;
-  // headless Chromium can't, so it falls back to 2D here (WebGPU isn't
-  // tested in CI).
+  // The browser runs guest code with the WebAssembly JIT by default.
   expect(s?.engine.engine).toBe("jit");
   expect(s?.engine.compiled ?? 0).toBeGreaterThan(0);
-  expect(s?.display.device).toBe("simplefb");
-  expect(["webgpu", "2d"]).toContain(s?.display.renderer);
+  // The default: virtio-gpu, drawn by the page with a 2D canvas.
+  expect(s?.display).toEqual({ device: "virtio-gpu", renderer: "2d" });
 });
 
-test("a virtio-gpu display drawn with a 2D canvas shows the splash, then Linux", async ({ page }, info) => {
-  await page.goto("./?relay=&display=virtio-gpu&renderer=2d");
+test("a simple-framebuffer display drawn by the worker shows the splash, then Linux", async ({ page }, info) => {
+  await page.goto("./?relay=&display=simplefb&renderer=2d");
   const display = page.locator("#display");
   await expect.poll(async () => (await stats(page))?.fps ?? 0, { timeout: 120_000 }).toBeGreaterThan(0);
   const splash = await display.screenshot({ path: info.outputPath("splash.png") });
 
   const screen = await bootToPrompt(page);
   await display.click();
-  await page.keyboard.type("echo hello from virtio-gpu\n");
+  await page.keyboard.type("echo hello from simplefb\n");
   await page.waitForTimeout(1500);
   const typed = await display.screenshot({ path: info.outputPath("console.png") });
   expect(typed.equals(splash)).toBe(false);
@@ -81,8 +78,8 @@ test("a virtio-gpu display drawn with a 2D canvas shows the splash, then Linux",
   await page.locator(".xterm").click();
   await page.keyboard.type("cat /sys/class/graphics/fb0/name; echo do''ne\n");
   await expect(screen).toContainText("done");
-  await expect(screen).toContainText("virtio_gpudrmfb");
-  expect((await stats(page))?.display).toEqual({ device: "virtio-gpu", renderer: "2d" });
+  await expect(screen).toContainText("simpledrm");
+  expect((await stats(page))?.display).toEqual({ device: "simplefb", renderer: "2d" });
 });
 
 test("the display can be turned off", async ({ page }) => {

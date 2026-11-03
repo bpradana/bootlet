@@ -26,6 +26,9 @@ type Display struct {
 	// Frames and Bytes count flushes that changed something and the RGBA
 	// bytes they produced, for statistics.
 	Frames, Bytes uint64
+
+	// Trace, if set, records every Flush (diagnostics only).
+	Trace *DisplayTrace
 }
 
 // Rect is a changed region in pixels. Its pixels are at Off in the RGBA data
@@ -73,6 +76,9 @@ func (d *Display) Invalidate() { d.full = true }
 // is only valid until the next call.
 func (d *Display) Flush() ([]Rect, []byte) {
 	if d.tracked && !d.changed && !d.full {
+		if d.Trace != nil {
+			d.Trace.Calls++
+		}
 		return nil, nil
 	}
 	d.changed = false
@@ -86,6 +92,9 @@ func (d *Display) Flush() ([]Rect, []byte) {
 		}
 	}
 	d.full = false
+	if d.Trace != nil {
+		d.Trace.flush(d, any, d.dirty, tx)
+	}
 	if !any {
 		return nil, nil
 	}

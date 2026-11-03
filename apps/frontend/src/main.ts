@@ -17,19 +17,34 @@ const netEl = document.getElementById("net")!;
 const params = new URLSearchParams(location.search);
 const memMiB = Number(params.get("mem")) || 0;
 const quiet = params.has("quiet");
-// ?display=0 boots without the graphical display; ?display=virtio-gpu drives
-// it with a virtio-gpu instead of a simple-framebuffer.
+// ?display=0 boots without the graphical display; ?display=simplefb drives
+// it with a simple-framebuffer instead of a virtio-gpu. With simplefb, Linux
+// copies fbdev writes into the framebuffer while the guest keeps drawing, so
+// the host often sees frames half copied (torn); virtio-gpu hands over whole
+// frames.
 const displayParam = params.get("display") ?? "";
 const withDisplay = displayParam !== "0";
-const displayDevice = displayParam === "virtio-gpu" ? displayParam : "";
-// ?renderer=2d draws the display with a 2D canvas instead of WebGPU.
+const displayDevice = displayParam === "simplefb" ? "" : "virtio-gpu";
+// The page draws the display itself by default: a canvas handed to the
+// worker (OffscreenCanvas) only reached the screen about once a second
+// while the guest was busy (apps/frontend/bench/display-trace.spec.ts).
+// ?offscreen=1 or ?renderer=webgpu|2d hand the canvas to the worker anyway,
+// drawn with that renderer (WebGPU when available by default).
 const renderer = params.get("renderer") ?? "";
+const offscreen = params.get("offscreen") === "1" || renderer !== "";
 // ?splash=0 skips the power-on screen the emulator draws until Linux does.
 const splash = params.get("splash") !== "0";
 // ?deterministic derives guest time from the instruction count (benchmarks).
 const deterministic = params.has("deterministic");
 // ?engine=interp runs the plain interpreter instead of the decoded-block cache.
 const engine = params.get("engine") ?? "";
+// ?trace=display records display timing in the stats (diagnostics; see
+// apps/frontend/bench/display-trace.spec.ts).
+const trace = params.get("trace") === "display";
+// ?yield=raf|timeout (diagnostics): after a present that drew something, the
+// worker continues from requestAnimationFrame or setTimeout instead of a
+// MessageChannel message, giving the browser a chance to show the canvas.
+const yieldMode = params.get("yield") ?? "";
 
 // Hooks for the end-to-end tests and benchmarks (apps/frontend/bench).
 type Stats = Extract<FromWorker, { type: "stats" }>;
@@ -37,6 +52,8 @@ const probe = {
   stats: undefined as Stats | undefined,
   times: {} as Record<string, number>, // performance.now() of state changes and the first prompt
   waiting: [] as ((s: Stats) => void)[],
+  // ?trace=display: every stats message's trace, with the page's Date.now().
+  traces: [] as { at: number; trace: NonNullable<Stats["trace"]> }[],
   statsNow: () => new Promise<Stats>((resolve) => {
     probe.waiting.push(resolve);
     send({ type: "stats" });
@@ -110,7 +127,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 term.onData((s) => send({ type: "input", data: encoder.encode(s) }));
 
-const screen = withDisplay ? initDisplay({ send, onHide: () => term.focus(), renderer }) : undefined;
+const screen = withDisplay ? initDisplay({ send, onHide: () => term.focus(), renderer, offscreen }) : undefined;
 if (!withDisplay) {
   document.getElementById("display-pane")!.hidden = true;
   document.getElementById("display-splitter")!.hidden = true;
@@ -263,6 +280,7 @@ worker.onmessage = (ev: MessageEvent<FromWorker>) => {
       emulatorMiB = msg.memMiB;
       files.emulator(msg);
       probe.stats = msg;
+      if (msg.trace) probe.traces.push({ at: Date.now(), trace: msg.trace });
       for (const w of probe.waiting.splice(0)) w(msg);
       renderTooltip();
       render();
@@ -447,7 +465,7 @@ netDisconnect.onclick = () => {
 netDialog.addEventListener("close", () => term.focus());
 
 function startMessage(): ToWorker {
-  return { type: "start", base: document.baseURI, relay, memMiB, quiet, display: withDisplay, displayDevice, splash, deterministic, engine };
+  return { type: "start", base: document.baseURI, relay, memMiB, quiet, display: withDisplay, displayDevice, splash, deterministic, engine, trace, yieldMode };
 }
 
 // Chrome's Memory Saver discards background tabs that use a lot of memory

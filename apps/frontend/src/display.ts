@@ -56,6 +56,7 @@ export function initDisplay(opts: {
   send: (msg: ToWorker, transfer?: Transferable[]) => void;
   onHide: () => void;
   renderer: string; // "webgpu", "2d" or "" (WebGPU when available)
+  offscreen: boolean; // hand the canvas to the worker
 }): Display {
   const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
   const pane = $("display-pane");
@@ -66,8 +67,11 @@ export function initDisplay(opts: {
   canvas.width = display.width;
   canvas.height = display.height;
 
-  // Prefer handing the canvas to the worker: pixels never cross threads.
-  // WebGPU there draws at the canvas's real size in device pixels.
+  // By default the worker posts changed regions and the page draws them
+  // with 2D. With opts.offscreen the canvas goes to the worker instead
+  // (pixels never cross threads, and WebGPU draws at the canvas's real size
+  // in device pixels), but Chrome then shows only a fraction of the frames
+  // while the guest is busy.
   let ctx: CanvasRenderingContext2D | null = null;
   const ro = new ResizeObserver(([e]) => {
     const box = e.devicePixelContentBoxSize?.[0];
@@ -84,7 +88,7 @@ export function initDisplay(opts: {
       ro.observe(canvas); // Safari: content-box, scaled by devicePixelRatio
     }
   }
-  if ("transferControlToOffscreen" in canvas) {
+  if (opts.offscreen && "transferControlToOffscreen" in canvas) {
     transfer(opts.renderer);
   } else {
     ctx = (canvas as HTMLCanvasElement).getContext("2d", { alpha: false });
