@@ -24,6 +24,8 @@ export type ToWorker =
       splash: boolean;
       deterministic: boolean;
       engine: string; // "blocks" (default) or "interp"
+      trace?: boolean; // record display timing (?trace=display, diagnostics)
+      yieldMode?: string; // diagnostics: "raf" or "timeout" after a drawn present
     }
   | { type: "stats" } // post stats now (benchmarks)
   | { type: "stop" } // pause execution
@@ -64,6 +66,7 @@ export type FromWorker =
       totalFrames: number;
       engine: EngineStats;
       display: DisplayStats;
+      trace?: DisplayTrace;
     }
   // Changed display regions as [x, y, w, h, offset] quintuples, with their
   // RGBA pixels packed row by row from offset in data.
@@ -73,6 +76,17 @@ export type FromWorker =
   | { type: "storage"; backend: "opfs" | "indexeddb" | "none"; detail?: string }
   | { type: "net"; state: NetState }
   | { type: "agent"; data: Uint8Array }; // bytes from the guest's file agent
+
+/** Display timing since the last stats message (with ?trace=display).
+ * device: counters from the emulator's display trace (see
+ * packages/emulator/devices/display_trace.go) and its per-flush records as
+ * [atMs, tiles, minY, maxY, top, bottom, gpuFlushes] rows; presents: one
+ * [atMs (worker clock), gapMs, runMs, drawMs, rects, area, seq] row per
+ * present that drew something. */
+export type DisplayTrace = {
+  device: Record<string, number> & { records: Float64Array } | null;
+  presents: number[][];
+};
 
 /** How guest code runs: the interpreter, the decoded-block cache, or the
  * WebAssembly JIT (with its counters since the machine was created). */

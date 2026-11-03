@@ -315,6 +315,9 @@ func (g *VirtioGPU) run(cmd uint32, b []byte) uint32 {
 			return gpuRespErrParameter
 		}
 		r.transfer(g.RAM, g.RAMBase, le.Uint64(b[16:]), x, y, w, h)
+		if t := g.display.Trace; t != nil {
+			t.GPUTransfers++
+		}
 		return gpuRespOKNoData
 
 	case gpuCmdResourceFlush: // rect, resource_id, padding
@@ -328,6 +331,9 @@ func (g *VirtioGPU) run(cmd uint32, b []byte) uint32 {
 		}
 		if g.scanout.resource == id {
 			g.show(r, u32(0), u32(1), u32(2), u32(3))
+			if t := g.display.Trace; t != nil {
+				t.gpuFlush(u32(3))
+			}
 		}
 		return gpuRespOKNoData
 	}

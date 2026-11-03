@@ -25,6 +25,10 @@ let displayDevice = "";
 let splash = false;
 let deterministic = false;
 let engine = "";
+let trace = false;
+let traceOn = false;
+let yieldMode = "";
+let drew = false; // the last present() drew something
 let ws: WebSocket | undefined;
 let reconnectDelay = 1000;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
@@ -44,7 +48,15 @@ const totals = { instructions: 0, busyMs: 0, frames: 0 };
 let renderer: Renderer | undefined;
 let canvasSize: [number, number] | undefined; // displayed size in device pixels
 let postFrames = false;
-const screen = new Uint8Array(display.width * display.height * 4);
+// With tracing, a present-sequence marker follows the screen's pixels.
+const MARK_W = 128;
+const MARK_H = 16;
+const screen = new Uint8Array(display.width * display.height * 4 + MARK_W * MARK_H * 4);
+// Per-present timing for ?trace=display.
+let presentSeq = 0;
+let lastPresent = 0;
+let lastRunMs = 0;
+let presents: number[][] = [];
 let lastFrame = 0;
 let frameTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -231,17 +243,52 @@ function present() {
     return;
   }
   lastFrame = now;
-  const rects = api.displayFlush(screen);
+  if (trace && !traceOn) {
+    api.displayTrace(true);
+    traceOn = true;
+  }
+  let rects = api.displayFlush(screen);
   if (!rects) return;
   frames++;
   totals.frames++;
+  drew = true;
+  if (trace) rects = mark(rects);
   if (renderer) {
+    const t0 = performance.now();
     renderer.draw(rects, screen);
+    if (trace) tracePresent(now, rects, performance.now() - t0);
   } else {
+    if (trace) tracePresent(now, rects, 0);
     const last = rects.length - 5;
     const data = screen.slice(0, rects[last + 4] + rects[last + 2] * rects[last + 3] * 4);
     post({ type: "frame", rects, data }, [data.buffer, rects.buffer]);
   }
+}
+
+// mark paints presentSeq as 8 black/white cells of 16x16 pixels in the
+// bottom-right corner, as an extra rectangle after the screen's changes, so
+// a screen capture shows which present each visible frame came from.
+function mark(rects: Int32Array): Int32Array {
+  presentSeq++;
+  const off = display.width * display.height * 4;
+  for (let y = 0; y < MARK_H; y++) {
+    for (let x = 0; x < MARK_W; x++) {
+      const v = (presentSeq >> (x >> 4)) & 1 ? 255 : 0;
+      screen.fill(v, off + (y * MARK_W + x) * 4, off + (y * MARK_W + x) * 4 + 3);
+      screen[off + (y * MARK_W + x) * 4 + 3] = 255;
+    }
+  }
+  const out = new Int32Array(rects.length + 5);
+  out.set(rects);
+  out.set([display.width - MARK_W, display.height - MARK_H, MARK_W, MARK_H, off], rects.length);
+  return out;
+}
+
+function tracePresent(now: number, rects: Int32Array, drawMs: number) {
+  let area = 0;
+  for (let i = 0; i + 4 < rects.length; i += 5) area += rects[i + 2] * rects[i + 3];
+  presents.push([now, lastPresent ? now - lastPresent : 0, lastRunMs, drawMs, rects.length / 5, area, presentSeq]);
+  lastPresent = now;
 }
 
 // useCanvas sets up drawing into the page's canvas. If the GPU device is
@@ -288,6 +335,7 @@ function postStats() {
     totalInstructions: totals.instructions,
     totalBusyMs: totals.busyMs,
     totalFrames: totals.frames,
+    trace: trace ? { device: api.displayTraceStats(), presents: presents.splice(0) } : undefined,
   });
   instructions = busyMs = frames = 0;
   statsSince = now;
@@ -299,6 +347,7 @@ function slice() {
   const t0 = performance.now();
   const r = api.run(SLICE_MS);
   const dt = performance.now() - t0;
+  lastRunMs = dt;
   busyMs += dt;
   totals.busyMs += dt;
   totals.instructions += r.instructions;
@@ -316,7 +365,14 @@ function slice() {
     return;
   }
   if (!r.idle) {
-    scheduleNow();
+    if (drew && yieldMode === "raf" && "requestAnimationFrame" in self) {
+      requestAnimationFrame(() => slice());
+    } else if (drew && yieldMode) {
+      setTimeout(slice, 0);
+    } else {
+      scheduleNow();
+    }
+    drew = false;
   } else if (r.idleMs >= 0) {
     idleTimer = setTimeout(slice, Math.max(1, r.idleMs));
   } // else: only input can wake the guest
@@ -364,6 +420,8 @@ self.onmessage = async (ev: MessageEvent<ToWorker>) => {
         splash = msg.splash;
         deterministic = msg.deterministic;
         engine = msg.engine;
+        trace = !!msg.trace;
+        yieldMode = msg.yieldMode ?? "";
       }
       await start();
       break;
