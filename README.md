@@ -434,8 +434,8 @@ The display is separate from the serial console. Console bytes still go through 
   at 15 frames per second and redraws only the bar and status line. Before every frame it
   checks that the framebuffer still holds exactly what it drew last. The first pixel the
   guest changes (simpledrm/fbcon taking over, about 0.4 s natively and 2 s in the browser)
-  ends it for good, so it never covers guest output. Boot time with and without it is
-  within run-to-run noise.
+  ends it for good, so it never covers guest output. It does not slow the boot. In
+  Chromium, the boot to the prompt took 10.0–10.6 s with it and 10.5–10.6 s without it.
 - **Page parameters.** `?display=0` boots without the display and keyboard, and
   `?splash=0` skips the splash. The **Display** button hides the pane, and the splitter
   resizes it.
@@ -504,7 +504,9 @@ the time spent executing guest code. **Wall** MIPS divides by elapsed time, so i
 falls while the guest idles or the browser is busy elsewhere. *Deterministic boot* is
 the most repeatable figure: with `Config.Deterministic` (`?deterministic` in the page),
 guest time comes from the instruction count and the random seed and clock are fixed, so
-every run executes the same instruction stream. The workloads are guest shell commands:
+natively every run executes the same instruction stream. In the page the count still varies
+by a few percent between runs, from asynchronous input such as the terminal's size reply,
+but there is no idle time in the measurement. The workloads are guest shell commands:
 `md5sum` of 16 MiB, `gzip -1` of 2 MiB, and a 20,000-iteration shell loop.
 
 | Browser (WebAssembly) | Interpreter | Decoded-block cache |

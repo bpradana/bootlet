@@ -9,6 +9,7 @@ import (
 
 	"bootlet/emulator/devices"
 	"bootlet/emulator/machine"
+	"bootlet/emulator/netstack"
 )
 
 // TestDeterministic boots in deterministic mode twice with each execution
@@ -21,6 +22,9 @@ func TestDeterministic(t *testing.T) {
 	run := func(engine string) (uint64, [32]byte, uint64) {
 		g := newGuest(t, machine.Config{Deterministic: true, Display: true, Engine: engine}, func(m *machine.Machine) {
 			m.ReplaceDisk(disk.Clone())
+			// As in the browser: the keyboard, and networking with no relay.
+			m.AttachKeyboard()
+			m.AttachNet(netstack.New(netstack.NewWispUpstream()))
 		})
 		g.waitFor(prompt, 2*time.Minute)
 		return g.instret, sha256.Sum256(g.m.RAM), g.m.CPU.PC
